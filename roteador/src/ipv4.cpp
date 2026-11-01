@@ -56,6 +56,11 @@ ipv4Header ipv4Interpreter(const vector<uint8_t> &packet){ //vetor onde cada pos
         return header;
     }
 
+    bool validCheckSum = verifyCheckSum(packet,IHL);
+    if(!validCheckSum){
+        return header;
+    }
+
     //criação da estrutura ipv4Header com os valores coletados
     header.version = version;
     header.IHL = IHL;
@@ -70,4 +75,31 @@ ipv4Header ipv4Interpreter(const vector<uint8_t> &packet){ //vetor onde cada pos
     header.destinationIPAddr = destinationIPAddr;
     header.valid = true;
     return header;
+};
+
+bool verifyCheckSum (const vector<uint8_t> &packet, uint8_t IHL){
+    int index = IHL*4;
+    uint32_t checkSum = 0;
+    for(int i =0; i<index; i+=2){
+        checkSum += (uint16_t(packet[i])<<8 | packet[i+1]);
+    };
+    while(checkSum>>16){
+        checkSum = (checkSum>>16) + (checkSum & 0b1111111111111111);
+    }
+    return checkSum == 0xFFFF;
+};
+
+uint16_t calculateCheckSum(const vector<uint8_t> &packet, uint8_t IHL){
+    int index = IHL*4;
+    uint32_t checkSum = 0;
+    for(int i =0; i<index; i+=2){
+        if(i == 10){ 
+            continue;
+        }
+        checkSum += (uint16_t(packet[i])<<8 | packet[i+1]);
+    };
+    while(checkSum>>16){
+        checkSum = (checkSum>>16) + (checkSum & 0b1111111111111111);
+    }
+    return (~checkSum) & 0xFFFF;
 };
