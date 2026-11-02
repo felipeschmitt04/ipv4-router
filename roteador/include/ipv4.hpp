@@ -21,5 +21,8 @@ struct ipv4Header{
 };
 
 ipv4Header ipv4Interpreter(const vector<uint8_t> &packet);
+bool verifyCheckSum (const vector<uint8_t> &packet, uint8_t IHL);
+uint16_t calculateCheckSum(const vector<uint8_t> &packet, uint8_t IHL);
+
 
 #endif
