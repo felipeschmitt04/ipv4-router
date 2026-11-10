@@ -5,59 +5,160 @@
 #include <unistd.h>
 #include <sys/socket.h>
 #include <linux/if_packet.h>
+#include <linux/if_ether.h>
 #include <arpa/inet.h>
+#include <utility>
+#include <optional>
+#include <iomanip>
+#include <sstream>
 
-EthernetInterface::EthernetInterface(const std::string& interface_name) : interfaceName(interface_name){
+EthernetInterface::EthernetInterface(const std::string &interface_name) : interfaceName(interface_name)
+{
     interfaceIndex = if_nametoindex(interfaceName.c_str()); // converte uma string para index
 
-    if(interfaceIndex == 0){ // valida o index
+    if (interfaceIndex == 0)
+    { // valida o index
         throw std::system_error(
             errno,
             std::generic_category(),
-            "falha ao obter indice da interface " + interfaceName
-        );
+            "falha ao obter indice da interface " + interfaceName);
     }
 
     // criando o socket
     fileDescriptor = socket(
-        AF_PACKET, // indica que o socket vai trabalhar com pacotes Ethernet no Linux
-        SOCK_RAW, // indica que o programa vai receber o quadro bruto, incluindo MAC destino, MAC origem, EtherType e payload
+        AF_PACKET,       // indica que o socket vai trabalhar com pacotes Ethernet no Linux
+        SOCK_RAW,        // indica que o programa vai receber o quadro bruto, incluindo MAC destino, MAC origem, EtherType e payload
         htons(ETH_P_ALL) // ETH_P_ALL aceita todos os protocolos Ethernet, htons converte esse valor para a ordem de bytes usada na rede
     );
 
-    if(fileDescriptor == -1){ // testar se a criação funcionou
+    if (fileDescriptor == -1)
+    { // testar se a criação funcionou
         throw std::system_error(
             errno,
             std::generic_category(),
-            "falha ao criar socket para a interface " + interfaceName
-        );
+            "falha ao criar socket para a interface " + interfaceName);
     }
 
     sockaddr_ll endereco{}; // cria e zera a estrutura para enderecos AF_PACKET
 
-    endereco.sll_family = AF_PACKET; // atribui que o endereco é da familia AF_PACKET
+    endereco.sll_family = AF_PACKET;          // atribui que o endereco é da familia AF_PACKET
     endereco.sll_protocol = htons(ETH_P_ALL); // socket recebera todos os EtherTypes
-    endereco.sll_ifindex = interfaceIndex; // associa o socket a interface recebida antes
+    endereco.sll_ifindex = interfaceIndex;    // associa o socket a interface recebida antes
 
-    if(bind( // associa o socket a interface definida em endereco
+    if (bind( // associa o socket a interface definida em endereco
             fileDescriptor,
-            reinterpret_cast<sockaddr*>(&endereco), // converte sockaddr_l para sockaddr esperado pelo bind
-            sizeof(endereco)
-    ) == -1){ // valida bind
+            reinterpret_cast<sockaddr *>(&endereco), // converte sockaddr_l para sockaddr esperado pelo bind
+            sizeof(endereco)) == -1)
+    { // valida bind
+        int error = errno;
+
         close(fileDescriptor); // fecha o descritor, porque o destrutor nao é chamado durante a construcao
         fileDescriptor = -1;
 
         throw std::system_error(
-            errno,
+            error,
             std::generic_category(),
-            "falha ao assocciar socket a interface " + interfaceName
-        );
+            "falha ao assocciar socket a interface " + interfaceName);
     }
 }
 
-EthernetInterface::~EthernetInterface(){
-    if(fileDescriptor != -1){
+EthernetInterface::~EthernetInterface()
+{
+    if (fileDescriptor != -1)
+    {
         close(fileDescriptor);
         fileDescriptor = -1;
     }
+}
+
+ReceivedFrame EthernetInterface::receive()
+{
+    std::vector<std::uint8_t> buffer(65536); // limite de buffer para receber o quadro
+
+    sockaddr_ll address{};
+    socklen_t addressLength = sizeof(address);
+
+    while (true)
+    {
+        ssize_t received = recvfrom(
+            fileDescriptor,
+            buffer.data(),
+            buffer.size(),
+            0,
+            reinterpret_cast<sockaddr *>(&address),
+            &addressLength);
+
+        if (received >= 0)
+        {
+            if (received == 0)
+            {
+                throw std::system_error(
+                    EPROTO,
+                    std::generic_category(),
+                    "quadro Ethernet vazio recebido");
+            }
+
+            buffer.resize(static_cast<std::size_t>(received)); // deixa o vetor com o tamanho real do quadro recebido
+
+            return ReceivedFrame{
+                std::move(buffer),
+                static_cast<unsigned int>(address.sll_ifindex)};
+        }
+
+        if (errno == EINTR)
+        {
+            continue;
+        }
+
+        throw std::system_error(
+            errno,
+            std::generic_category(),
+            "falha ao receber quadro Ethernet");
+    }
+}
+
+std::optional<EthernetHeader> parseEthernetHeader(
+    const ReceivedFrame &frame)
+{
+    constexpr std::size_t ethernetHeaderSize = 14;
+
+    if (frame.data.size() < ethernetHeaderSize)
+    {
+        return std::nullopt;
+    }
+
+    EthernetHeader header{};
+
+    for (std::size_t i = 0; i < 6; ++i)
+    {
+        header.destination[i] = frame.data[i];
+        header.source[i] = frame.data[i + 6];
+    }
+
+    header.etherType =
+        (static_cast<std::uint16_t>(frame.data[12]) << 8) |
+        static_cast<std::uint16_t>(frame.data[13]);
+
+    return header;
+}
+
+std::string formatMac(
+    const std::array<std::uint8_t, 6> &mac)
+{
+    std::ostringstream result;
+
+    for (std::size_t i = 0; i < mac.size(); ++i)
+    {
+        if (i != 0)
+        {
+            result << ':';
+        }
+
+        result << std::hex
+               << std::setw(2)
+               << std::setfill('0')
+               << static_cast<unsigned int>(mac[i]);
+    }
+
+    return result.str();
 }
