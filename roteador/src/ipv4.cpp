@@ -103,3 +103,17 @@ uint16_t calculateCheckSum(const vector<uint8_t> &packet, uint8_t IHL){
     }
     return (~checkSum) & 0xFFFF;
 };
+
+bool newTTL (vector<uint8_t> &packet){
+    ipv4Header header = ipv4Interpreter(packet);
+    if( !header.valid or header.TTL <= 1){
+        return false; //TTL em zero ou será decrementado para zero agora.
+    }
+    header.TTL--;
+    packet[8] = header.TTL;
+
+    uint16_t newCheckSum = calculateCheckSum(packet, header.IHL);
+    packet[10] = newCheckSum>>8;
+    packet[11] = newCheckSum & 0xFF;
+    return true;
+}
