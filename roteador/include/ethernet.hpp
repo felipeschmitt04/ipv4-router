@@ -36,8 +36,8 @@ public:
   EthernetInterface(const std::string &interface_name);
   ~EthernetInterface();
 
-  EthernetInterface(const EthernetInterface &) = delete;
-  EthernetInterface &operator=(const EthernetInterface &) = delete;
+  EthernetInterface(const EthernetInterface &) = delete; // construtor de copia
+  EthernetInterface &operator=(const EthernetInterface &) = delete; // operador de atribuição por copia
 
   ReceivedFrame receive();
 };

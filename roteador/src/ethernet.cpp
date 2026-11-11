@@ -71,16 +71,16 @@ EthernetInterface::~EthernetInterface()
     }
 }
 
-ReceivedFrame EthernetInterface::receive()
+ReceivedFrame EthernetInterface::receive() // função que bloqueia ate chegar um quadro Ethernet pela interface associada ao socket
 {
-    std::vector<std::uint8_t> buffer(65536); // limite de buffer para receber o quadro
+    std::vector<std::uint8_t> buffer(65536); // limite de buffer para receber o quadro, 65536 é um limite seguro
 
     sockaddr_ll address{};
     socklen_t addressLength = sizeof(address);
 
     while (true)
     {
-        ssize_t received = recvfrom(
+        ssize_t received = recvfrom( // copia os bytes recebidos para o buffer
             fileDescriptor,
             buffer.data(),
             buffer.size(),
@@ -100,7 +100,7 @@ ReceivedFrame EthernetInterface::receive()
 
             buffer.resize(static_cast<std::size_t>(received)); // deixa o vetor com o tamanho real do quadro recebido
 
-            return ReceivedFrame{
+            return ReceivedFrame{// retorna os bytes completos do quadro e o indice da interface que o recebeu
                 std::move(buffer),
                 static_cast<unsigned int>(address.sll_ifindex)};
         }
@@ -117,7 +117,7 @@ ReceivedFrame EthernetInterface::receive()
     }
 }
 
-std::optional<EthernetHeader> parseEthernetHeader(
+std::optional<EthernetHeader> parseEthernetHeader( // interpreta o cabeçalho
     const ReceivedFrame &frame)
 {
     constexpr std::size_t ethernetHeaderSize = 14;
@@ -153,11 +153,11 @@ std::string formatMac(
         {
             result << ':';
         }
-
-        result << std::hex
-               << std::setw(2)
-               << std::setfill('0')
-               << static_cast<unsigned int>(mac[i]);
+        // cada byte é impresso em
+        result << std::hex                           // hexadecimal
+               << std::setw(2)                       // com largura minima de dois caracteres
+               << std::setfill('0')                  // preenchimento de zero a esquerda
+               << static_cast<unsigned int>(mac[i]); // garante que o valor vai ser impresso numericamente
     }
 
     return result.str();
