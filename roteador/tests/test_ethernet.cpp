@@ -72,6 +72,48 @@ void testaEtherTypeNaoSuportado()
     assert(!suportado);
 }
 
+void testaMontagemDeQuadroARP()
+{
+    const std::array<std::uint8_t, 6> destino{
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff
+    };
+
+    const std::array<std::uint8_t, 6> origem{
+        0x02, 0x00, 0x00, 0x00, 0x01, 0x00
+    };
+
+    const std::vector<std::uint8_t> payload{
+        0x00, 0x01, 0x08, 0x00
+    };
+
+    auto frame = buildEthernetFrame(
+        destino,
+        origem,
+        0x0806,
+        payload);
+
+    assert(frame.size() == 60);
+
+    for (std::size_t i = 0; i < 6; ++i)
+    {
+        assert(frame[i] == destino[i]);
+        assert(frame[i + 6] == origem[i]);
+    }
+
+    assert(frame[12] == 0x08);
+    assert(frame[13] == 0x06);
+
+    for (std::size_t i = 0; i < payload.size(); ++i)
+    {
+        assert(frame[14 + i] == payload[i]);
+    }
+
+    for (std::size_t i = 14 + payload.size(); i < frame.size(); ++i)
+    {
+        assert(frame[i] == 0);
+    }
+}
+
 int main()
 {
     testaQuadroIPv4();
@@ -79,6 +121,7 @@ int main()
     testaQuadroTruncado();
     testaQuadroExatamenteCabecalho();
     testaEtherTypeNaoSuportado();
+    testaMontagemDeQuadroARP();
 
     std::cout << "Todos os testes Ethernet passaram.\n";
 }

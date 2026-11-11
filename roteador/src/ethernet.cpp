@@ -11,6 +11,7 @@
 #include <optional>
 #include <iomanip>
 #include <sstream>
+#include <cstring>
 
 EthernetInterface::EthernetInterface(const std::string &interface_name) : interfaceName(interface_name)
 {
@@ -101,8 +102,8 @@ ReceivedFrame EthernetInterface::receive() // função que bloqueia ate chegar u
             buffer.resize(static_cast<std::size_t>(received)); // deixa o vetor com o tamanho real do quadro recebido
 
             return ReceivedFrame{// retorna os bytes completos do quadro e o indice da interface que o recebeu
-                std::move(buffer),
-                static_cast<unsigned int>(address.sll_ifindex)};
+                                 std::move(buffer),
+                                 static_cast<unsigned int>(address.sll_ifindex)};
         }
 
         if (errno == EINTR)
@@ -114,6 +115,64 @@ ReceivedFrame EthernetInterface::receive() // função que bloqueia ate chegar u
             errno,
             std::generic_category(),
             "falha ao receber quadro Ethernet");
+    }
+}
+
+void EthernetInterface::send(
+    const std::vector<std::uint8_t> &frame)
+{
+    constexpr std::size_t EthernetHeaderSize = 14;
+
+    if (frame.size() < EthernetHeaderSize)
+    {
+        throw std::invalid_argument(
+            "quadro Ethernet menor que o cabecalho");
+    }
+
+    sockaddr_ll address{};
+    address.sll_family = AF_PACKET;
+    address.sll_protocol = htons(
+        static_cast<std::uint16_t>(
+            (static_cast<std::uint16_t>(frame[12]) << 8) |
+            frame[13]));
+    address.sll_ifindex = static_cast<int>(interfaceIndex);
+    address.sll_halen = ETH_ALEN;
+
+    std::memcpy( // copia o MAC destino
+        address.sll_addr,
+        frame.data(),
+        ETH_ALEN);
+
+    while (true)
+    {
+        ssize_t sent = sendto(
+            fileDescriptor,
+            frame.data(),
+            frame.size(),
+            0,
+            reinterpret_cast<sockaddr *>(&address),
+            sizeof(address));
+
+        if (sent >= 0)
+        {
+            if (static_cast<std::size_t>(sent) != frame.size())
+            {
+                throw std::system_error(
+                    EIO,
+                    std::generic_category(),
+                    "transmissao parcial de quadro Ethernet");
+            }
+            return;
+        }
+        if (errno == EINTR)
+        {
+            continue;
+        }
+
+        throw std::system_error(
+            errno,
+            std::generic_category(),
+            "falha ao transmitir quadro Ethernet");
     }
 }
 
@@ -161,4 +220,32 @@ std::string formatMac(
     }
 
     return result.str();
+}
+
+std::vector<std::uint8_t> buildEthernetFrame(
+    const std::array<std::uint8_t, 6> &destination,
+    const std::array<std::uint8_t, 6> &source,
+    std::uint16_t etherType,
+    const std::vector<std::uint8_t> &payload)
+{
+    constexpr std::size_t ethernetHeaderSize = 14;
+    constexpr std::size_t minimumFrameSize = 60;
+
+    std::vector<std::uint8_t> frame;
+    frame.reserve(ethernetHeaderSize + payload.size()); // aloca espaço no vector
+
+    frame.insert(frame.end(), destination.begin(), destination.end());
+    frame.insert(frame.end(), source.begin(), source.end());
+
+    frame.push_back(static_cast<std::uint8_t>(etherType >> 8));
+    frame.push_back(static_cast<std::uint8_t>(etherType & 0xff));
+
+    frame.insert(frame.end(), payload.begin(), payload.end()); // insere o payload depois do cabeçalho
+
+    if (frame.size() < minimumFrameSize)
+    {
+        frame.resize(minimumFrameSize, 0); // preenche o vetor com zeros, caso nao tenha o tamanho minimo
+    }
+
+    return frame;
 }

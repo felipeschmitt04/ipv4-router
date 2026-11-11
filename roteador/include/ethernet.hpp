@@ -24,6 +24,12 @@ std::optional<EthernetHeader> parseEthernetHeader(
 std::string formatMac(
     const std::array<std::uint8_t, 6> &mac);
 
+std::vector<std::uint8_t> buildEthernetFrame(
+    const std::array<std::uint8_t, 6> &destination,
+    const std::array<std::uint8_t, 6> &source,
+    std::uint16_t etherType,
+    const std::vector<std::uint8_t> &payload);
+
 // classe que representa uma interface Ethernet que sera controlada pelo programa
 class EthernetInterface
 {
@@ -36,8 +42,10 @@ public:
   EthernetInterface(const std::string &interface_name);
   ~EthernetInterface();
 
-  EthernetInterface(const EthernetInterface &) = delete; // construtor de copia
+  EthernetInterface(const EthernetInterface &) = delete;            // construtor de copia
   EthernetInterface &operator=(const EthernetInterface &) = delete; // operador de atribuição por copia
 
   ReceivedFrame receive();
+
+  void send(const std::vector<std::uint8_t> &frame);
 };
