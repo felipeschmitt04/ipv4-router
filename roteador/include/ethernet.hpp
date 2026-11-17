@@ -30,6 +30,10 @@ std::vector<std::uint8_t> buildEthernetFrame(
     std::uint16_t etherType,
     const std::vector<std::uint8_t> &payload);
 
+bool isFrameForInterface(
+    const EthernetHeader &header,
+    const std::array<std::uint8_t, 6> &localMac);
+
 // classe que representa uma interface Ethernet que sera controlada pelo programa
 class EthernetInterface
 {

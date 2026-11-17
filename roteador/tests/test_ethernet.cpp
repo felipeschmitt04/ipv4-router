@@ -1,4 +1,5 @@
 #include "../include/ethernet.hpp"
+#include "../include/config.hpp"
 
 #include <cassert>
 #include <cstdint>
@@ -75,16 +76,13 @@ void testaEtherTypeNaoSuportado()
 void testaMontagemDeQuadroARP()
 {
     const std::array<std::uint8_t, 6> destino{
-        0xff, 0xff, 0xff, 0xff, 0xff, 0xff
-    };
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
 
     const std::array<std::uint8_t, 6> origem{
-        0x02, 0x00, 0x00, 0x00, 0x01, 0x00
-    };
+        0x02, 0x00, 0x00, 0x00, 0x01, 0x00};
 
     const std::vector<std::uint8_t> payload{
-        0x00, 0x01, 0x08, 0x00
-    };
+        0x00, 0x01, 0x08, 0x00};
 
     auto frame = buildEthernetFrame(
         destino,
@@ -114,6 +112,66 @@ void testaMontagemDeQuadroARP()
     }
 }
 
+void testaQuadroNoLimite()
+{
+    const std::array<std::uint8_t, 6> destino{
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+
+    const std::array<std::uint8_t, 6> origem{
+        0x02, 0x00, 0x00, 0x00, 0x01, 0x00};
+
+    const std::vector<std::uint8_t> payload(46, 0xab);
+
+    auto frame = buildEthernetFrame(
+        destino,
+        origem,
+        0x0806,
+        payload);
+
+    assert(frame.size() == 60);
+
+    for (std::size_t i = 0; i < payload.size(); ++i)
+    {
+        assert(frame[14 + i] == payload[i]);
+    }
+}
+
+void testaQuadroAcimaDoMinimo()
+{
+    const std::array<std::uint8_t, 6> destino{
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+
+    const std::array<std::uint8_t, 6> origem{
+        0x02, 0x00, 0x00, 0x00, 0x01, 0x00};
+
+    const std::vector<std::uint8_t> payload(100, 0xcd);
+
+    auto frame = buildEthernetFrame(
+        destino,
+        origem,
+        0x0806,
+        payload);
+
+    assert(frame.size() == 114);
+
+    for (std::size_t i = 0; i < payload.size(); ++i)
+    {
+        assert(frame[14 + i] == payload[i]);
+    }
+}
+
+void testaConvertMAC(){
+    const std::string texto = "02:00:00:00:01:00";
+
+    const std::array<std::uint8_t, 6> esperado{
+        0x02, 0x00, 0x00, 0x00, 0x01, 0x00
+    };
+
+    auto resultado = convertMAC(texto);
+
+    assert(resultado == esperado);
+}
+
 int main()
 {
     testaQuadroIPv4();
@@ -122,6 +180,9 @@ int main()
     testaQuadroExatamenteCabecalho();
     testaEtherTypeNaoSuportado();
     testaMontagemDeQuadroARP();
+    testaQuadroNoLimite();
+    testaQuadroAcimaDoMinimo();
+    testaConvertMAC();
 
     std::cout << "Todos os testes Ethernet passaram.\n";
 }
