@@ -1,0 +1,1 @@
+g++ -std=c++17 -pthread -Iinclude src/*.cpp -o roteador

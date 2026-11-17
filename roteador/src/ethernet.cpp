@@ -99,6 +99,11 @@ ReceivedFrame EthernetInterface::receive() // função que bloqueia ate chegar u
                     "quadro Ethernet vazio recebido");
             }
 
+            if (address.sll_pkttype == PACKET_OUTGOING)
+            {
+                continue;
+            }
+
             buffer.resize(static_cast<std::size_t>(received)); // deixa o vetor com o tamanho real do quadro recebido
 
             return ReceivedFrame{// retorna os bytes completos do quadro e o indice da interface que o recebeu
@@ -248,4 +253,19 @@ std::vector<std::uint8_t> buildEthernetFrame(
     }
 
     return frame;
+}
+
+bool isFrameForInterface(
+    const EthernetHeader &header,
+    const std::array<std::uint8_t, 6> &localMac)
+{
+    const std::array<std::uint8_t, 6> broadcast = {
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+
+    if (header.destination == localMac)
+        return true;
+    if (header.destination == broadcast)
+        return true;
+
+    return false;
 }
