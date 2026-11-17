@@ -4,6 +4,17 @@
 #include <cstdint>
 #include <optional>
 #include <vector>
+#include <string>
+#include <chrono>
+#include <mutex>
+
+struct ArpCacheEntry
+{
+    std::uint32_t neighborIp;
+    std::array<std::uint8_t, 6> learnedMac;
+    std::string interfaceName;
+    std::chrono::steady_clock::time_point expirationTime;
+};
 
 struct ArpMessage
 {
@@ -18,12 +29,31 @@ struct ArpMessage
     std::uint32_t targetIP;
 };
 
+class ArpCache
+{
+private:
+    std::vector<ArpCacheEntry> cacheEntries;
+    std::mutex cacheMutex;
+
+public:
+    void learn(
+        std::uint32_t neighborIp,
+        const std::array<std::uint8_t, 6> &learnedMac,
+        const std::string &interfaceName,
+        std::chrono::steady_clock::time_point now);
+
+    std::optional<std::array<std::uint8_t, 6>> lookup(
+        std::uint32_t neighborIp,
+        const std::string &interfaceName,
+        std::chrono::steady_clock::time_point now);
+    void removeExpired(std::chrono::steady_clock::time_point now);
+};
+
 std::optional<ArpMessage> parseArpMessage(const std::vector<std::uint8_t> &bytes_Arp);
 
 bool shouldReplyToArpRequest(
-    const ArpMessage& message,
-    std::uint32_t incomingInterfaceIp
-);
+    const ArpMessage &message,
+    std::uint32_t incomingInterfaceIp);
 
 std::vector<std::uint8_t> buildArpReply(
     const ArpMessage &request,

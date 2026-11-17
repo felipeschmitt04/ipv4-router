@@ -1,5 +1,39 @@
 #include "../include/arp.hpp"
 
+#include <algorithm>
+
+void ArpCache::learn(
+    std::uint32_t neighborIp,
+    const std::array<std::uint8_t, 6> &learnedMac,
+    const std::string &interfaceName,
+    std::chrono::steady_clock::time_point now)
+{
+    std::lock_guard<std::mutex> lock(cacheMutex);
+
+    auto existingEntry = std::find_if(
+        cacheEntries.begin(),
+        cacheEntries.end(),
+        [&](const ArpCacheEntry &entry)
+        {
+            return entry.neighborIp == neighborIp &&
+                   entry.interfaceName == interfaceName;
+        });
+
+    const auto expirationTime = now + std::chrono::seconds(30);
+
+    if (existingEntry != cacheEntries.end())
+    {
+        existingEntry->learnedMac = learnedMac;
+        existingEntry->expirationTime = expirationTime;
+        return;
+    }
+
+    cacheEntries.push_back({neighborIp,
+                            learnedMac,
+                            interfaceName,
+                            expirationTime});
+}
+
 std::optional<ArpMessage> parseArpMessage(const std::vector<std::uint8_t> &bytes_Arp)
 {
     if (bytes_Arp.size() < 28)
@@ -41,6 +75,48 @@ std::optional<ArpMessage> parseArpMessage(const std::vector<std::uint8_t> &bytes
         (static_cast<std::uint32_t>(bytes_Arp[27]));
 
     return mensagem;
+}
+
+std::optional<std::array<std::uint8_t, 6>> ArpCache::lookup(
+    std::uint32_t neighborIp,
+    const std::string &interfaceName,
+    std::chrono::steady_clock::time_point now)
+{
+    std::lock_guard<std::mutex> lock(cacheMutex);
+
+    auto existingEntry = std::find_if(
+        cacheEntries.begin(),
+        cacheEntries.end(),
+        [&](const ArpCacheEntry &entry)
+        {
+            return entry.neighborIp == neighborIp &&
+                   entry.interfaceName == interfaceName;
+        });
+
+    if(existingEntry == cacheEntries.end()){
+        return std::nullopt;
+    }
+
+    if(now >= existingEntry->expirationTime){
+        cacheEntries.erase(existingEntry);
+        return std::nullopt;
+    }
+
+    return existingEntry->learnedMac;
+}
+
+void ArpCache::removeExpired(std::chrono::steady_clock::time_point now){
+    std::lock_guard<std::mutex> lock(cacheMutex);
+
+    const auto firstExpired = std::remove_if(
+        cacheEntries.begin(),
+        cacheEntries.end(),
+        [now](const ArpCacheEntry& entry){
+            return now >= entry.expirationTime;
+        }
+    );
+
+    cacheEntries.erase(firstExpired, cacheEntries.end());
 }
 
 bool shouldReplyToArpRequest(
