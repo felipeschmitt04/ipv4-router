@@ -101,7 +101,9 @@ void runCacheExpiration(ArpResolver& arpResolver)
     while (true)
     {
         std::this_thread::sleep_for(std::chrono::seconds(1));
-        arpResolver.removeExpired(std::chrono::steady_clock::now());
+        const auto now = std::chrono::steady_clock::now();
+        arpResolver.processTimeouts(now);
+        arpResolver.removeExpired(now);
     }
 }
 
