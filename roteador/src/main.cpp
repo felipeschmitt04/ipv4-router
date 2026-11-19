@@ -2,6 +2,7 @@
 #include "../include/ethernet.hpp"
 #include "../include/config.hpp"
 #include "../include/interface.hpp"
+#include "../include/arp_resolver.hpp"
 
 #include <array>
 #include <cassert>
@@ -17,7 +18,7 @@ void handleArpFrame(
     EthernetInterface &ethernet,
     const interface &incomingInterface,
     const ReceivedFrame &receivedFrame,
-    ArpCache &arpCache)
+    ArpResolver& arpResolver)
 {
     constexpr std::size_t ethernetHeaderSize = 14;
 
@@ -52,10 +53,9 @@ void handleArpFrame(
     if (request->targetIP == incomingInterface.interfaceIpAddr &&
         request->senderIP != 0)
     {
-        arpCache.learn(
-            request->senderIP,
-            request->senderMAC,
-            incomingInterface.interfaceName,
+        arpResolver.learnFromArp(
+            *request,
+            incomingInterface,
             std::chrono::steady_clock::now());
     }
 
@@ -80,7 +80,7 @@ void handleArpFrame(
     ethernet.send(replyFrame);
 }
 
-void runInterface(interface incomingInterface, ArpCache &arpCache)
+void runInterface(interface incomingInterface, ArpResolver& arpResolver)
 {
     EthernetInterface ethernet(incomingInterface.interfaceName);
 
@@ -92,14 +92,16 @@ void runInterface(interface incomingInterface, ArpCache &arpCache)
             ethernet,
             incomingInterface,
             receivedFrame,
-            arpCache);
+            arpResolver);
     }
 }
 
-void runCacheExpiration(ArpCache& arpCache){
-    while(true){
+void runCacheExpiration(ArpResolver& arpResolver)
+{
+    while (true)
+    {
         std::this_thread::sleep_for(std::chrono::seconds(1));
-        arpCache.removeExpired(std::chrono::steady_clock::now());
+        arpResolver.removeExpired(std::chrono::steady_clock::now());
     }
 }
 
@@ -113,16 +115,22 @@ int main(int argc, char *argv[])
 
     loadConfig(argv[1]);
 
-    ArpCache arpCache;
+    ArpResolver arpResolver(
+        [](const std::string &interfaceName,
+           const std::vector<std::uint8_t> &frame)
+        {
+            EthernetInterface output(interfaceName);
+            output.send(frame);
+        });
 
     std::vector<std::thread> workers;
 
     for (const interface &configuredInterface : allInterfaces)
     {
-        workers.emplace_back(runInterface, configuredInterface, std::ref(arpCache));
+        workers.emplace_back(runInterface, configuredInterface, std::ref(arpResolver));
     }
 
-    workers.emplace_back(runCacheExpiration, std::ref(arpCache));
+    workers.emplace_back(runCacheExpiration, std::ref(arpResolver));
 
     for (std::thread &worker : workers)
     {

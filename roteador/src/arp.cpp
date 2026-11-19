@@ -93,11 +93,13 @@ std::optional<std::array<std::uint8_t, 6>> ArpCache::lookup(
                    entry.interfaceName == interfaceName;
         });
 
-    if(existingEntry == cacheEntries.end()){
+    if (existingEntry == cacheEntries.end())
+    {
         return std::nullopt;
     }
 
-    if(now >= existingEntry->expirationTime){
+    if (now >= existingEntry->expirationTime)
+    {
         cacheEntries.erase(existingEntry);
         return std::nullopt;
     }
@@ -105,16 +107,17 @@ std::optional<std::array<std::uint8_t, 6>> ArpCache::lookup(
     return existingEntry->learnedMac;
 }
 
-void ArpCache::removeExpired(std::chrono::steady_clock::time_point now){
+void ArpCache::removeExpired(std::chrono::steady_clock::time_point now)
+{
     std::lock_guard<std::mutex> lock(cacheMutex);
 
     const auto firstExpired = std::remove_if(
         cacheEntries.begin(),
         cacheEntries.end(),
-        [now](const ArpCacheEntry& entry){
+        [now](const ArpCacheEntry &entry)
+        {
             return now >= entry.expirationTime;
-        }
-    );
+        });
 
     cacheEntries.erase(firstExpired, cacheEntries.end());
 }
@@ -161,4 +164,35 @@ std::vector<std::uint8_t> buildArpReply(
     reply.push_back(static_cast<std::uint8_t>(request.senderIP));
 
     return reply;
+}
+
+std::vector<std::uint8_t> buildArpRequest(
+    const std::array<std::uint8_t, 6> &localMac,
+    std::uint32_t localIp,
+    std::uint32_t targetIp)
+{
+    std::vector<std::uint8_t> request = {
+        0x00, 0x01, // Ethernet
+        0x08, 0x00, // IPv4
+        0x06,       // MAC
+        0x04,       // IP
+        0x00, 0x01  // operacao: request
+    };
+
+    request.insert(request.end(), localMac.begin(), localMac.end());
+
+    request.push_back(static_cast<std::uint8_t>(localIp >> 24));
+    request.push_back(static_cast<std::uint8_t>(localIp >> 16));
+    request.push_back(static_cast<std::uint8_t>(localIp >> 8));
+    request.push_back(static_cast<std::uint8_t>(localIp));
+
+    std::array<std::uint8_t, 6> targetMac{};
+    request.insert(request.end(), targetMac.begin(), targetMac.end());
+
+    request.push_back(static_cast<std::uint8_t>(targetIp >> 24));
+    request.push_back(static_cast<std::uint8_t>(targetIp >> 16));
+    request.push_back(static_cast<std::uint8_t>(targetIp >> 8));
+    request.push_back(static_cast<std::uint8_t>(targetIp));
+
+    return request;
 }
