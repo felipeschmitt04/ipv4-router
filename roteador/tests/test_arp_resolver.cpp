@@ -132,11 +132,142 @@ void testLearningConcludesPendingResolution()
     assert(sentFrames.size() == 2);
 }
 
+void testQueuedPacketsAreReleasedInArrivalOrder()
+{
+    std::vector<std::vector<std::uint8_t>> sentFrames;
+    ArpResolver resolver(
+        [&](const std::string &, const std::vector<std::uint8_t> &frame)
+        {
+            sentFrames.push_back(frame);
+        });
+
+    const interface outputInterface{
+        0x0A000101,
+        24,
+        "eth0",
+        {0x02, 0x00, 0x00, 0x00, 0x01, 0x00}};
+    const auto now = std::chrono::steady_clock::time_point{};
+    constexpr std::uint32_t nextHopIp = 0x0A000102;
+    const std::vector<std::uint8_t> firstPacket = {0x45, 0x01, 0xa1};
+    const std::vector<std::uint8_t> secondPacket = {0x45, 0x02, 0xb2};
+
+    assert(resolver.sendOrQueue(nextHopIp, outputInterface, firstPacket, now) ==
+           ArpPacketStatus::Queued);
+    assert(resolver.sendOrQueue(nextHopIp, outputInterface, secondPacket, now) ==
+           ArpPacketStatus::Queued);
+    assert(sentFrames.size() == 1);
+
+    ArpMessage reply{};
+    reply.senderIP = nextHopIp;
+    reply.senderMAC = {0x02, 0x00, 0x00, 0x00, 0x01, 0x02};
+    reply.targetIP = outputInterface.interfaceIpAddr;
+    resolver.learnFromArp(reply, outputInterface, now);
+
+    assert(sentFrames.size() == 3);
+    for (std::size_t index = 0; index < 6; ++index)
+    {
+        assert(sentFrames[1][index] == reply.senderMAC[index]);
+        assert(sentFrames[1][6 + index] == outputInterface.mac[index]);
+    }
+    assert(sentFrames[1][12] == 0x08 && sentFrames[1][13] == 0x00);
+    assert(sentFrames[1][14] == firstPacket[0]);
+    assert(sentFrames[1][15] == firstPacket[1]);
+    assert(sentFrames[1][16] == firstPacket[2]);
+    assert(sentFrames[2][14] == secondPacket[0]);
+    assert(sentFrames[2][15] == secondPacket[1]);
+    assert(sentFrames[2][16] == secondPacket[2]);
+}
+
+void testCachedMacSendsIpv4Immediately()
+{
+    std::vector<std::vector<std::uint8_t>> sentFrames;
+    ArpResolver resolver(
+        [&](const std::string &, const std::vector<std::uint8_t> &frame)
+        {
+            sentFrames.push_back(frame);
+        });
+
+    const interface outputInterface{
+        0x0A000101,
+        24,
+        "eth0",
+        {0x02, 0x00, 0x00, 0x00, 0x01, 0x00}};
+    const auto now = std::chrono::steady_clock::time_point{};
+    constexpr std::uint32_t nextHopIp = 0x0A000102;
+    const std::array<std::uint8_t, 6> nextHopMac = {
+        0x02, 0x00, 0x00, 0x00, 0x01, 0x02};
+
+    ArpMessage reply{};
+    reply.senderIP = nextHopIp;
+    reply.senderMAC = nextHopMac;
+    reply.targetIP = outputInterface.interfaceIpAddr;
+    resolver.learnFromArp(reply, outputInterface, now);
+
+    assert(resolver.sendOrQueue(
+               nextHopIp,
+               outputInterface,
+               {0x45, 0xaa},
+               now) == ArpPacketStatus::Sent);
+    assert(sentFrames.size() == 1);
+    assert(sentFrames[0][0] == nextHopMac[0]);
+    assert(sentFrames[0][12] == 0x08 && sentFrames[0][13] == 0x00);
+    assert(sentFrames[0][14] == 0x45 && sentFrames[0][15] == 0xaa);
+}
+
+void testQueueRejectsSeventeenthPacket()
+{
+    std::vector<std::vector<std::uint8_t>> sentFrames;
+    ArpResolver resolver(
+        [&](const std::string &, const std::vector<std::uint8_t> &frame)
+        {
+            sentFrames.push_back(frame);
+        });
+
+    const interface outputInterface{
+        0x0A000101,
+        24,
+        "eth0",
+        {0x02, 0x00, 0x00, 0x00, 0x01, 0x00}};
+    const auto now = std::chrono::steady_clock::time_point{};
+    constexpr std::uint32_t nextHopIp = 0x0A000102;
+
+    for (std::uint8_t index = 0; index < 16; ++index)
+    {
+        assert(resolver.sendOrQueue(
+                   nextHopIp,
+                   outputInterface,
+                   {0x45, index},
+                   now) == ArpPacketStatus::Queued);
+    }
+
+    assert(resolver.sendOrQueue(
+               nextHopIp,
+               outputInterface,
+               {0x45, 0xff},
+               now) == ArpPacketStatus::QueueFull);
+    assert(sentFrames.size() == 1);
+
+    ArpMessage reply{};
+    reply.senderIP = nextHopIp;
+    reply.senderMAC = {0x02, 0x00, 0x00, 0x00, 0x01, 0x02};
+    reply.targetIP = outputInterface.interfaceIpAddr;
+    resolver.learnFromArp(reply, outputInterface, now);
+
+    assert(sentFrames.size() == 17);
+    for (std::uint8_t index = 0; index < 16; ++index)
+    {
+        assert(sentFrames[index + 1][15] == index);
+    }
+}
+
 int main()
 {
     testResolvedNextHopUsesCachedMac();
     testMissingNextHopSendsOneBroadcastRequest();
     testLearningConcludesPendingResolution();
+    testQueuedPacketsAreReleasedInArrivalOrder();
+    testCachedMacSendsIpv4Immediately();
+    testQueueRejectsSeventeenthPacket();
 
     std::cout << "Todos os testes do resolvedor ARP passaram.\n";
 }
