@@ -19,10 +19,17 @@ enum class ArpResolutionStatus
     Pending
 };
 
-enum class ArpPacketStatus{
+enum class ArpPacketStatus
+{
     Sent,
     Queued,
     QueueFull
+};
+
+enum class PacketOrigin
+{
+    Received,
+    Generated
 };
 
 struct ArpResolutionResult
@@ -35,12 +42,28 @@ using ArpFrameSender = std::function<void(
     const std::string &interfaceName,
     const std::vector<std::uint8_t> &frame)>;
 
+using ArpFailureReporter = std::function<void(
+    std::uint32_t nextHopIp,
+    const std::string &interfaceName)>;
+
+using ArpIcmpErrorHandler = std::function<void(
+    const std::vector<std::uint8_t> &originalPacket)>;
+
 class ArpResolver
 {
 private:
     struct PendingPacket
     {
         std::vector<std::uint8_t> ipv4Packet;
+        PacketOrigin origin;
+    };
+
+    struct ArpRequestToSend
+    {
+        std::uint32_t nextHopIp;
+        std::string interfaceName;
+        std::array<std::uint8_t, 6> sourceMac;
+        std::uint32_t sourceIp;
     };
 
     struct PendingResolution
@@ -48,6 +71,9 @@ private:
         std::uint32_t nextHopIp;
         std::string interfaceName;
         std::array<std::uint8_t, 6> sourceMac;
+        std::uint32_t sourceIp;
+        std::chrono::steady_clock::time_point firstRequestAt;
+        std::uint8_t requestsSent;
         std::deque<PendingPacket> packets;
     };
 
@@ -55,11 +81,16 @@ private:
     std::vector<PendingResolution> pendingResolutions;
     std::mutex pendingMutex;
     ArpFrameSender frameSender;
+    ArpFailureReporter failureReporter;
+    ArpIcmpErrorHandler icmpErrorHandler;
 
     static constexpr std::size_t maxPacketsPerResolution = 16;
 
 public:
-    explicit ArpResolver(ArpFrameSender frameSender);
+    explicit ArpResolver(
+        ArpFrameSender frameSender,
+        ArpFailureReporter failureReporter = {},
+        ArpIcmpErrorHandler icmpErrorHandler = {});
 
     ArpResolutionResult resolve(
         std::uint32_t nextHopIp,
@@ -75,8 +106,11 @@ public:
 
     ArpPacketStatus sendOrQueue(
         std::uint32_t nextHopIp,
-        const interface& outputInterface,
+        const interface &outputInterface,
         std::vector<std::uint8_t> ipv4Packet,
-        std::chrono::steady_clock::time_point now
-    );
+        std::chrono::steady_clock::time_point now,
+        PacketOrigin origin = PacketOrigin::Received);
+
+    void processTimeouts(
+        std::chrono::steady_clock::time_point now);
 };

@@ -4,7 +4,11 @@
 #include <algorithm>
 #include <utility>
 
-ArpResolver::ArpResolver(ArpFrameSender frameSender) : frameSender(std::move(frameSender))
+ArpResolver::ArpResolver(ArpFrameSender frameSender,
+                         ArpFailureReporter failureReporter,
+                         ArpIcmpErrorHandler icmpErrorHandler) : frameSender(std::move(frameSender)),
+                                                                 failureReporter(std::move(failureReporter)),
+                                                                 icmpErrorHandler(std::move(icmpErrorHandler))
 {
 }
 
@@ -39,7 +43,7 @@ ArpResolutionResult ArpResolver::resolve(
         if (pending == pendingResolutions.end())
         {
             pendingResolutions.push_back(
-                {nextHopIp, outputInterface.interfaceName, outputInterface.mac, {}});
+                {nextHopIp, outputInterface.interfaceName, outputInterface.mac, outputInterface.interfaceIpAddr, now, 1, {}});
             shouldSendRequest = true;
         }
     }
@@ -135,7 +139,8 @@ ArpPacketStatus ArpResolver::sendOrQueue(
     std::uint32_t nextHopIp,
     const interface &outputInterface,
     std::vector<std::uint8_t> ipv4Packet,
-    std::chrono::steady_clock::time_point now)
+    std::chrono::steady_clock::time_point now,
+    PacketOrigin origin)
 {
     const auto learnedMac = cache.lookup(
         nextHopIp,
@@ -174,7 +179,7 @@ ArpPacketStatus ArpResolver::sendOrQueue(
             }
 
             pending->packets.push_back(
-                PendingPacket{std::move(ipv4Packet)});
+                PendingPacket{std::move(ipv4Packet), origin});
 
             return ArpPacketStatus::Queued;
         }
@@ -183,10 +188,13 @@ ArpPacketStatus ArpResolver::sendOrQueue(
             nextHopIp,
             outputInterface.interfaceName,
             outputInterface.mac,
+            outputInterface.interfaceIpAddr,
+            now,
+            1,
             {}};
 
         newPending.packets.push_back(
-            PendingPacket{std::move(ipv4Packet)});
+            PendingPacket{std::move(ipv4Packet), origin});
 
         pendingResolutions.push_back(std::move(newPending));
     }
@@ -208,4 +216,86 @@ ArpPacketStatus ArpResolver::sendOrQueue(
     frameSender(outputInterface.interfaceName, arpFrame);
 
     return ArpPacketStatus::Queued;
+}
+
+void ArpResolver::processTimeouts(
+    std::chrono::steady_clock::time_point now)
+{
+    std::vector<ArpRequestToSend> requestsToSend;
+    std::vector<PendingResolution> failedResolutions;
+
+    {
+        std::lock_guard<std::mutex> lock(pendingMutex);
+
+        for (auto pending = pendingResolutions.begin();
+             pending != pendingResolutions.end();)
+        {
+            const auto elapsed = now - pending->firstRequestAt;
+
+            if (elapsed >= std::chrono::seconds(3))
+            {
+                failedResolutions.push_back(std::move(*pending));
+                pending = pendingResolutions.erase(pending);
+                continue;
+            }
+
+            const bool retryDue =
+                (pending->requestsSent == 1 &&
+                 elapsed >= std::chrono::seconds(1)) ||
+                (pending->requestsSent == 2 &&
+                 elapsed >= std::chrono::seconds(2));
+
+            if (retryDue)
+            {
+                requestsToSend.push_back({pending->nextHopIp,
+                                          pending->interfaceName,
+                                          pending->sourceMac,
+                                          pending->sourceIp});
+
+                ++pending->requestsSent;
+            }
+
+            ++pending;
+        }
+    }
+
+    for (const PendingResolution &failed : failedResolutions)
+    {
+        if (failureReporter)
+        {
+            failureReporter(failed.nextHopIp, failed.interfaceName);
+        }
+
+        if (!icmpErrorHandler)
+        {
+            continue;
+        }
+
+        for (const PendingPacket &packet : failed.packets)
+        {
+            if (packet.origin == PacketOrigin::Received)
+            {
+                icmpErrorHandler(packet.ipv4Packet);
+            }
+        }
+    }
+
+    const std::array<std::uint8_t, 6> broadcast = {
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+
+    for (const ArpRequestToSend &request : requestsToSend)
+    {
+        const auto arpPayload = buildArpRequest(
+            request.sourceMac,
+            request.sourceIp,
+            request.nextHopIp);
+
+        const auto arpFrame = buildEthernetFrame(
+            broadcast,
+            request.sourceMac,
+            0x0806,
+            arpPayload);
+
+        frameSender(request.interfaceName, arpFrame);
+    }
 }

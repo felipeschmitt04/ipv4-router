@@ -260,6 +260,110 @@ void testQueueRejectsSeventeenthPacket()
     }
 }
 
+void testArpRequestsAreRetransmittedAtOneAndTwoSeconds()
+{
+    std::vector<std::vector<std::uint8_t>> sentFrames;
+    ArpResolver resolver(
+        [&](const std::string &, const std::vector<std::uint8_t> &frame)
+        {
+            sentFrames.push_back(frame);
+        });
+
+    const interface outputInterface{
+        0x0A000101,
+        24,
+        "eth0",
+        {0x02, 0x00, 0x00, 0x00, 0x01, 0x00}};
+    const auto start = std::chrono::steady_clock::time_point{};
+    constexpr std::uint32_t nextHopIp = 0x0A000102;
+
+    resolver.sendOrQueue(nextHopIp, outputInterface, {0x45}, start);
+    assert(sentFrames.size() == 1);
+
+    resolver.processTimeouts(start + std::chrono::milliseconds(999));
+    assert(sentFrames.size() == 1);
+
+    resolver.processTimeouts(start + std::chrono::seconds(1));
+    assert(sentFrames.size() == 2);
+
+    resolver.processTimeouts(start + std::chrono::seconds(1));
+    assert(sentFrames.size() == 2);
+
+    resolver.processTimeouts(start + std::chrono::seconds(2));
+    assert(sentFrames.size() == 3);
+
+    for (const auto &frame : sentFrames)
+    {
+        assert(frame[12] == 0x08 && frame[13] == 0x06);
+        assert(frame[20] == 0x00 && frame[21] == 0x01);
+        assert(frame[38] == 10);
+        assert(frame[39] == 0);
+        assert(frame[40] == 1);
+        assert(frame[41] == 2);
+    }
+}
+
+void testTimeoutReportsFailureAndNotifiesOnlyReceivedPackets()
+{
+    std::vector<std::vector<std::uint8_t>> sentFrames;
+    std::vector<std::pair<std::uint32_t, std::string>> reportedFailures;
+    std::vector<std::vector<std::uint8_t>> icmpOriginalPackets;
+    ArpResolver resolver(
+        [&](const std::string &, const std::vector<std::uint8_t> &frame)
+        {
+            sentFrames.push_back(frame);
+        },
+        [&](std::uint32_t nextHopIp, const std::string &interfaceName)
+        {
+            reportedFailures.push_back({nextHopIp, interfaceName});
+        },
+        [&](const std::vector<std::uint8_t> &originalPacket)
+        {
+            icmpOriginalPackets.push_back(originalPacket);
+        });
+
+    const interface outputInterface{
+        0x0A000101,
+        24,
+        "eth0",
+        {0x02, 0x00, 0x00, 0x00, 0x01, 0x00}};
+    const auto start = std::chrono::steady_clock::time_point{};
+    constexpr std::uint32_t nextHopIp = 0x0A000102;
+    const std::vector<std::uint8_t> receivedPacket = {0x45, 0x01};
+    const std::vector<std::uint8_t> generatedPacket = {0x45, 0x02};
+
+    resolver.sendOrQueue(nextHopIp, outputInterface, receivedPacket, start);
+    resolver.sendOrQueue(
+        nextHopIp,
+        outputInterface,
+        generatedPacket,
+        start,
+        PacketOrigin::Generated);
+
+    resolver.processTimeouts(start + std::chrono::seconds(1));
+    resolver.processTimeouts(start + std::chrono::seconds(2));
+    assert(sentFrames.size() == 3);
+
+    resolver.processTimeouts(start + std::chrono::seconds(3));
+    assert(sentFrames.size() == 3);
+    assert(reportedFailures.size() == 1);
+    assert(reportedFailures[0].first == nextHopIp);
+    assert(reportedFailures[0].second == "eth0");
+    assert(icmpOriginalPackets.size() == 1);
+    assert(icmpOriginalPackets[0] == receivedPacket);
+
+    resolver.processTimeouts(start + std::chrono::seconds(4));
+    assert(reportedFailures.size() == 1);
+    assert(icmpOriginalPackets.size() == 1);
+
+    assert(resolver.sendOrQueue(
+               nextHopIp,
+               outputInterface,
+               receivedPacket,
+               start + std::chrono::seconds(4)) == ArpPacketStatus::Queued);
+    assert(sentFrames.size() == 4);
+}
+
 int main()
 {
     testResolvedNextHopUsesCachedMac();
@@ -268,6 +372,8 @@ int main()
     testQueuedPacketsAreReleasedInArrivalOrder();
     testCachedMacSendsIpv4Immediately();
     testQueueRejectsSeventeenthPacket();
+    testArpRequestsAreRetransmittedAtOneAndTwoSeconds();
+    testTimeoutReportsFailureAndNotifiesOnlyReceivedPackets();
 
     std::cout << "Todos os testes do resolvedor ARP passaram.\n";
 }
