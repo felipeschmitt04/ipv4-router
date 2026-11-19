@@ -59,3 +59,8 @@ std::vector<std::uint8_t> buildArpReply(
     const ArpMessage &request,
     const std::array<std::uint8_t, 6> &localMac,
     std::uint32_t localIp);
+
+std::vector<std::uint8_t> buildArpRequest(
+    const std::array<std::uint8_t, 6> &localMac,
+    std::uint32_t localIp,
+    std::uint32_t targetIp);

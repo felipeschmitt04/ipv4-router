@@ -98,6 +98,37 @@ void testaExpiracaoArp()
                 .has_value());
 }
 
+void testaConstrucaoDeArpRequest()
+{
+    const std::array<std::uint8_t, 6> localMac = {
+        0x02, 0x00, 0x00, 0x00, 0x01, 0x00};
+    const auto request = buildArpRequest(
+        localMac,
+        0x0A000101,
+        0x0A000102);
+
+    assert(request.size() == 28);
+    assert(request[0] == 0x00 && request[1] == 0x01);
+    assert(request[2] == 0x08 && request[3] == 0x00);
+    assert(request[4] == 0x06 && request[5] == 0x04);
+    assert(request[6] == 0x00 && request[7] == 0x01);
+
+    for (std::size_t index = 0; index < localMac.size(); ++index)
+    {
+        assert(request[8 + index] == localMac[index]);
+        assert(request[18 + index] == 0x00);
+    }
+
+    assert(request[14] == 10);
+    assert(request[15] == 0);
+    assert(request[16] == 1);
+    assert(request[17] == 1);
+    assert(request[24] == 10);
+    assert(request[25] == 0);
+    assert(request[26] == 1);
+    assert(request[27] == 2);
+}
+
 int main()
 {
     testArpParser();
@@ -106,6 +137,7 @@ int main()
     testaAtualizacaoArp();
     testaInterfaceDoCacheArp();
     testaExpiracaoArp();
+    testaConstrucaoDeArpRequest();
 
     std::cout << "Todos os testes ARP passaram.\n";
 }
