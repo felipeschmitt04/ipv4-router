@@ -1,4 +1,5 @@
 #include "../include/arp.hpp"
+#include "../include/logger.hpp"
 
 #include <algorithm>
 
@@ -9,6 +10,8 @@ void ArpCache::learn(
     std::chrono::steady_clock::time_point now)
 {
     std::lock_guard<std::mutex> lock(cacheMutex);
+
+    logArpAprendido(neighborIp, learnedMac, interfaceName);
 
     auto existingEntry = std::find_if(
         cacheEntries.begin(),
@@ -100,6 +103,7 @@ std::optional<std::array<std::uint8_t, 6>> ArpCache::lookup(
 
     if (now >= existingEntry->expirationTime)
     {
+        logArpExpirado(existingEntry->neighborIp);
         cacheEntries.erase(existingEntry);
         return std::nullopt;
     }
@@ -110,6 +114,14 @@ std::optional<std::array<std::uint8_t, 6>> ArpCache::lookup(
 void ArpCache::removeExpired(std::chrono::steady_clock::time_point now)
 {
     std::lock_guard<std::mutex> lock(cacheMutex);
+
+    for (const auto &entry : cacheEntries)
+    {
+        if (now >= entry.expirationTime)
+        {
+            logArpExpirado(entry.neighborIp);
+        }
+    }
 
     const auto firstExpired = std::remove_if(
         cacheEntries.begin(),
