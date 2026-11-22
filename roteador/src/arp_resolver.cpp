@@ -1,5 +1,6 @@
 #include "../include/arp_resolver.hpp"
 #include "../include/ethernet.hpp"
+#include "../include/logger.hpp"
 
 #include <algorithm>
 #include <utility>
@@ -261,6 +262,8 @@ void ArpResolver::processTimeouts(
 
     for (const PendingResolution &failed : failedResolutions)
     {
+        logArpFalhou(failed.nextHopIp, failed.interfaceName);
+
         if (failureReporter)
         {
             failureReporter(failed.nextHopIp, failed.interfaceName);
