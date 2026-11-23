@@ -1,5 +1,6 @@
 #include "../include/arp_resolver.hpp"
 #include "../include/ethernet.hpp"
+#include "../include/ipv4.hpp"
 #include "../include/logger.hpp"
 
 #include <algorithm>
@@ -176,6 +177,11 @@ ArpPacketStatus ArpResolver::sendOrQueue(
         {
             if (pending->packets.size() >= maxPacketsPerResolution)
             {
+                const ipv4Header header = ipv4Interpreter(ipv4Packet);
+                if (header.valid)
+                {
+                    logDescarte("fila_arp", header.sourceIPAddr, header.destinationIPAddr, header.protocol);
+                }
                 return ArpPacketStatus::QueueFull;
             }
 
@@ -264,6 +270,15 @@ void ArpResolver::processTimeouts(
     {
         logArpFalhou(failed.nextHopIp, failed.interfaceName);
 
+        for (const PendingPacket &packet : failed.packets)
+        {
+            const ipv4Header header = ipv4Interpreter(packet.ipv4Packet);
+            if (header.valid)
+            {
+                logDescarte("arp", header.sourceIPAddr, header.destinationIPAddr, header.protocol);
+            }
+        }
+        
         if (failureReporter)
         {
             failureReporter(failed.nextHopIp, failed.interfaceName);
