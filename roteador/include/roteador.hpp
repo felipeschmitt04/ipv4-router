@@ -1,4 +1,3 @@
-
 #pragma once
 
 #include <vector>
@@ -31,6 +30,7 @@ struct IPv4Result {
     string outputInterface;
     uint32_t nextHop = 0;
     string dropReason;
+    size_t filterRule = 0; // índice da regra de filtro (baseado em 1) quando dropReason == "filtro"
 };
 
 
@@ -41,4 +41,13 @@ using IPv4Filter = function<bool(
     const string&
 )>;
 
-IPv4Result processIPv4(vector<uint8_t>& packet,const string& inputInterface,const IPv4Filter& filter);
+// Sobrecarga que permite ao módulo de filtro informar o número da regra (começando em 1)
+using IPv4IndexedFilter = function<bool(
+    const vector<uint8_t>&,
+    const ipv4Header&,
+    const string&,
+    size_t&
+)>;
+
+IPv4Result processIPv4(vector<uint8_t>& packet, const string& inputInterface, const IPv4Filter& filter);
+IPv4Result processIPv4(vector<uint8_t>& packet, const string& inputInterface, const IPv4IndexedFilter& filter);
