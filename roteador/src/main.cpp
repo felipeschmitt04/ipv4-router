@@ -132,9 +132,28 @@ void sendIcmpError(
     bool ethBroadcast,
     const std::string& dropReason,
     ArpResolver& arpResolver,
-    std::optional<std::uint32_t> overrideSrcIp = std::nullopt) {
+    std::optional<std::uint32_t> overrideSrcIp = std::nullopt,
+    bool fromMgmt = false) {
     const ipv4Header origHdr = ipv4Interpreter(originalPacket);
     if (!origHdr.valid) {
+        return;
+    }
+
+    if (fromMgmt) {
+        const auto mgmtIface = findMgmtInterface();
+        if (!mgmtIface.has_value()) {
+            return;
+        }
+        const std::uint32_t srcIp = overrideSrcIp.value_or(mgmtIface->interfaceIpAddr);
+        const auto icmpPkt = buildICMPError(
+            originalPacket, type, code, srcIp, ethBroadcast, dropReason);
+        if (icmpPkt.empty()) {
+            return;
+        }
+        globalMetrics().incIcmpGerados();
+        dispatchQueuedPacket(
+            arpResolver, origHdr.sourceIPAddr, *mgmtIface,
+            icmpPkt, PacketOrigin::Generated);
         return;
     }
 
@@ -233,9 +252,7 @@ void handleArpFrame(
 }
 
 void handleLocalPacket(
-    EthernetInterface& ethernet,
     const interface& incomingInterface,
-    const EthernetHeader& ethHeader,
     const std::vector<std::uint8_t>& ipv4Packet,
     const ipv4Header& rawHdr,
     bool ethBroadcast,
@@ -274,12 +291,12 @@ void handleLocalPacket(
                 if (incomingInterface.interfaceName == "mgmt0" &&
                     rawHdr.destinationIPAddr == incomingInterface.interfaceIpAddr) {
                     globalMetrics().incIcmpGerados();
-                    const auto outFrame = buildEthernetFrame(
-                        ethHeader.source,
-                        incomingInterface.mac,
-                        0x0800,
-                        echoReply);
-                    sendFrame(ethernet, "mgmt0", outFrame);
+                    dispatchQueuedPacket(
+                        arpResolver,
+                        rawHdr.sourceIPAddr,
+                        incomingInterface,
+                        echoReply,
+                        PacketOrigin::Generated);
                     return;
                 }
 
@@ -351,7 +368,8 @@ void handleLocalPacket(
             ethBroadcast,
             "local",
             arpResolver,
-            rawHdr.destinationIPAddr);
+            rawHdr.destinationIPAddr,
+            incomingInterface.interfaceName == "mgmt0");
         return;
     }
 
@@ -359,7 +377,6 @@ void handleLocalPacket(
 }
 
 void handleIPv4Frame(
-    EthernetInterface& ethernet,
     const interface& incomingInterface,
     const EthernetHeader& ethHeader,
     const ReceivedFrame& receivedFrame,
@@ -396,15 +413,15 @@ void handleIPv4Frame(
                 httpRespPacket,
                 incHttp)) {
             if (!httpRespPacket.empty()) {
-                const auto outFrame = buildEthernetFrame(
-                    ethHeader.source,
-                    incomingInterface.mac,
-                    0x0800,
-                    httpRespPacket);
-                sendFrame(ethernet, "mgmt0", outFrame);
                 if (incHttp) {
                     globalMetrics().incRespostasHttp();
                 }
+                dispatchQueuedPacket(
+                    arpResolver,
+                    rawHdr.sourceIPAddr,
+                    incomingInterface,
+                    httpRespPacket,
+                    PacketOrigin::Generated);
             }
             return;
         }
@@ -419,9 +436,7 @@ void handleIPv4Frame(
 
     if (res.action == IPv4Action::Local) {
         handleLocalPacket(
-            ethernet,
             incomingInterface,
-            ethHeader,
             originalPacket,
             rawHdr,
             ethBroadcast,
@@ -489,7 +504,6 @@ void runInterface(interface incomingInterface, ArpResolver& arpResolver) {
                 arpResolver);
         } else if (ethHeader->etherType == 0x0800) {
             handleIPv4Frame(
-                ethernet,
                 incomingInterface,
                 *ethHeader,
                 receivedFrame,
