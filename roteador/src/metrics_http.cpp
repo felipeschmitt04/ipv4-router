@@ -92,10 +92,6 @@ std::string evaluateHttpRequest(const std::string& payload) {
     const std::string target = requestLine.substr(sp1 + 1, sp2 - (sp1 + 1));
     const std::string version = requestLine.substr(sp2 + 1);
 
-    if (target.empty() || target[0] != '/') {
-        return buildHttpResponse("400 Bad Request", "");
-    }
-
     if (version != "HTTP/1.1" && version != "HTTP/1.0") {
         return buildHttpResponse("400 Bad Request", "");
     }

@@ -186,7 +186,7 @@ std::optional<EthernetHeader> parseEthernetHeader( // interpreta o cabeçalho
 {
     constexpr std::size_t ethernetHeaderSize = 14;
 
-    if (frame.data.size() < ethernetHeaderSize)
+    if (frame.data.size() < ethernetHeaderSize || frame.data.size() > 1514)
     {
         return std::nullopt;
     }

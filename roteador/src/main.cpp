@@ -361,7 +361,7 @@ void handleIPv4Frame(
     ArpResolver& arpResolver) {
     constexpr std::size_t ethernetHeaderSize = 14;
 
-    if (receivedFrame.data.size() <= ethernetHeaderSize) {
+    if (receivedFrame.data.size() < ethernetHeaderSize) {
         globalMetrics().incDescartesQuadro();
         return;
     }

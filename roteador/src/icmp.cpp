@@ -184,12 +184,8 @@ vector<uint8_t> buildICMPError(
     }
 
     // Não gerar erros ICMP em resposta a outros erros ICMP
-    if (header.protocol == 1) {
+    if (header.protocol == 1 && header.totalLength > header.IHL * 4) {
         size_t offset = header.IHL * 4;
-
-        if (header.totalLength < offset + 8) {
-            return {};
-        }
 
         uint8_t originalType = packet[offset];
 
