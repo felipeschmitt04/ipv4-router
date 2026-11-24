@@ -47,6 +47,12 @@ public:
         const std::string &interfaceName,
         std::chrono::steady_clock::time_point now);
     void removeExpired(std::chrono::steady_clock::time_point now);
+
+    std::size_t size()
+    {
+        std::lock_guard<std::mutex> lock(cacheMutex);
+        return cacheEntries.size();
+    }
 };
 
 std::optional<ArpMessage> parseArpMessage(const std::vector<std::uint8_t> &bytes_Arp);
