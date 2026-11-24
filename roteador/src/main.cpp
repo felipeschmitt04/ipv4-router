@@ -23,6 +23,7 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
+#include <utility>
 
 namespace {
 
@@ -112,13 +113,15 @@ void dispatchQueuedPacket(
     std::uint32_t nextHopIp,
     const interface& outIface,
     const std::vector<std::uint8_t>& pkt,
-    PacketOrigin origin) {
+    PacketOrigin origin,
+    std::optional<ReceivedPacketContext> context = std::nullopt) {
     const ArpPacketStatus st = arpResolver.sendOrQueue(
         nextHopIp,
         outIface,
         pkt,
         std::chrono::steady_clock::now(),
-        origin);
+        origin,
+        std::move(context));
     if (st == ArpPacketStatus::QueueFull) {
         globalMetrics().incDescartePorMotivo("fila_arp");
     }
@@ -132,27 +135,11 @@ void sendIcmpError(
     bool ethBroadcast,
     const std::string& dropReason,
     ArpResolver& arpResolver,
-    std::optional<std::uint32_t> overrideSrcIp = std::nullopt,
+    std::uint32_t srcIp,
     bool fromMgmt = false) {
     const ipv4Header origHdr = ipv4Interpreter(originalPacket);
     if (!origHdr.valid) {
         return;
-    }
-
-    // O 3/1 ainda nao possui o contexto da interface de chegada.
-    // A etapa seguinte preservara esse contexto na fila ARP.
-    std::uint32_t srcIp = overrideSrcIp.value_or(0u);
-    if (!overrideSrcIp.has_value()) {
-        const forwardingResult fallback = forwarding(
-            origHdr.sourceIPAddr, allInterfaces, routeTable);
-        if (fallback.found) {
-            const auto iface = findInterface(fallback.interfaceName);
-            if (iface.has_value()) {
-                srcIp = iface->interfaceIpAddr;
-            }
-        } else if (!allInterfaces.empty()) {
-            srcIp = allInterfaces.front().interfaceIpAddr;
-        }
     }
 
     const auto icmpPkt = buildICMPError(
@@ -462,7 +449,8 @@ void handleIPv4Frame(
                 res.nextHop,
                 *outIface,
                 ipv4Packet,
-                PacketOrigin::Received);
+                PacketOrigin::Received,
+                ReceivedPacketContext{originalPacket, incomingInterface.interfaceIpAddr, ethBroadcast});
         }
     }
 }
@@ -544,16 +532,9 @@ int main(int argc, char* argv[]) {
                 globalMetrics().incDescartePorMotivo("arp");
             }
         },
-        [&](const std::vector<std::uint8_t>& forwardedPacket) {
-            std::vector<std::uint8_t> original = forwardedPacket;
-            if (original.size() >= 20) {
-                original[8] = static_cast<std::uint8_t>(original[8] + 1);
-                const uint8_t ihl = original[0] & 0x0Fu;
-                const uint16_t csum = calculateCheckSum(original, ihl);
-                original[10] = static_cast<uint8_t>(csum >> 8);
-                original[11] = static_cast<uint8_t>(csum & 0xFFu);
-            }
-            sendIcmpError(original, 3, 1, false, "arp", arpResolver);
+        [&](const ReceivedPacketContext& context) {
+            sendIcmpError(context.originalPacket, 3, 1, context.ethBroadcast,
+                          "arp", arpResolver, context.incomingIp);
         });
 
     std::vector<std::thread> workers;

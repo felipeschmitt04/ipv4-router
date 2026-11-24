@@ -142,7 +142,8 @@ ArpPacketStatus ArpResolver::sendOrQueue(
     const interface &outputInterface,
     std::vector<std::uint8_t> ipv4Packet,
     std::chrono::steady_clock::time_point now,
-    PacketOrigin origin)
+    PacketOrigin origin,
+    std::optional<ReceivedPacketContext> context)
 {
     const auto learnedMac = cache.lookup(
         nextHopIp,
@@ -186,7 +187,7 @@ ArpPacketStatus ArpResolver::sendOrQueue(
             }
 
             pending->packets.push_back(
-                PendingPacket{std::move(ipv4Packet), origin});
+                PendingPacket{std::move(ipv4Packet), origin, std::move(context)});
 
             return ArpPacketStatus::Queued;
         }
@@ -201,7 +202,7 @@ ArpPacketStatus ArpResolver::sendOrQueue(
             {}};
 
         newPending.packets.push_back(
-            PendingPacket{std::move(ipv4Packet), origin});
+            PendingPacket{std::move(ipv4Packet), origin, std::move(context)});
 
         pendingResolutions.push_back(std::move(newPending));
     }
@@ -291,9 +292,9 @@ void ArpResolver::processTimeouts(
 
         for (const PendingPacket &packet : failed.packets)
         {
-            if (packet.origin == PacketOrigin::Received)
+            if (packet.origin == PacketOrigin::Received && packet.context.has_value())
             {
-                icmpErrorHandler(packet.ipv4Packet);
+                icmpErrorHandler(*packet.context);
             }
         }
     }

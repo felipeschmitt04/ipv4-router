@@ -48,8 +48,15 @@ using ArpFailureReporter = std::function<void(
     const std::string &interfaceName,
     std::size_t droppedPacketsCount)>;
 
+struct ReceivedPacketContext
+{
+    std::vector<std::uint8_t> originalPacket;
+    std::uint32_t incomingIp;
+    bool ethBroadcast;
+};
+
 using ArpIcmpErrorHandler = std::function<void(
-    const std::vector<std::uint8_t> &originalPacket)>;
+    const ReceivedPacketContext &context)>;
 
 class ArpResolver
 {
@@ -58,6 +65,7 @@ private:
     {
         std::vector<std::uint8_t> ipv4Packet;
         PacketOrigin origin;
+        std::optional<ReceivedPacketContext> context;
     };
 
     struct ArpRequestToSend
@@ -111,7 +119,8 @@ public:
         const interface &outputInterface,
         std::vector<std::uint8_t> ipv4Packet,
         std::chrono::steady_clock::time_point now,
-        PacketOrigin origin = PacketOrigin::Received);
+        PacketOrigin origin = PacketOrigin::Received,
+        std::optional<ReceivedPacketContext> context = std::nullopt);
 
     void processTimeouts(
         std::chrono::steady_clock::time_point now);
