@@ -312,17 +312,20 @@ void handleLocalPacket(
             return;
         }
 
-        const std::vector<uint8_t> udpSeg(
+        std::vector<uint8_t> udpSeg(
             ipv4Packet.begin() + static_cast<ptrdiff_t>(ipHdrLen),
             ipv4Packet.begin() + static_cast<ptrdiff_t>(rawHdr.totalLength));
 
         const uint16_t udpLen = (static_cast<uint16_t>(udpSeg[4]) << 8) | udpSeg[5];
         const uint16_t udpCsum = (static_cast<uint16_t>(udpSeg[6]) << 8) | udpSeg[7];
 
-        if (udpLen < 8u || udpLen != udpSeg.size()) {
+        if (udpLen < 8u || udpLen > udpSeg.size()) {
             globalMetrics().incDescartesCabecalho();
             return;
         }
+
+        // Considera apenas os bytes declarados no cabecalho UDP.
+        udpSeg.resize(udpLen);
 
         if (udpCsum != 0u &&
             udpChecksumCheck(rawHdr.sourceIPAddr, rawHdr.destinationIPAddr, udpSeg) != 0u) {
