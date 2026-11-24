@@ -13,7 +13,10 @@
 #include "../include/routing.hpp"
 
 #include <array>
+#include <atomic>
+#include <cerrno>
 #include <chrono>
+#include <cstdio>
 #include <cstdint>
 #include <iostream>
 #include <memory>
@@ -24,6 +27,9 @@
 #include <unordered_map>
 #include <vector>
 #include <utility>
+#include <pthread.h>
+#include <signal.h>
+#include <system_error>
 
 namespace {
 
@@ -93,8 +99,9 @@ void sendFrame(
     const std::string& ifaceName,
     const std::vector<std::uint8_t>& frame) {
     std::lock_guard<std::mutex> lock(sendMutex);
-    ethernet.send(frame);
-    globalMetrics().incQuadrosEnviados(ifaceName);
+    if (ethernet.send(frame)) {
+        globalMetrics().incQuadrosEnviados(ifaceName);
+    }
 }
 
 void sendFrameByName(
@@ -450,15 +457,19 @@ void handleIPv4Frame(
     }
 }
 
-void runInterface(interface incomingInterface, ArpResolver& arpResolver) {
+void runInterface(const interface& incomingInterface, ArpResolver& arpResolver,
+                  const std::atomic<bool>& stopping) {
     EthernetInterface& ethernet =
         *ethernetInterfaces.at(incomingInterface.interfaceName);
 
-    while (true) {
-        const ReceivedFrame receivedFrame = ethernet.receive();
+    while (!stopping.load()) {
+        const auto receivedFrame = ethernet.receive();
+        if (!receivedFrame || stopping.load()) {
+            continue;
+        }
         globalMetrics().incQuadrosRecebidos(incomingInterface.interfaceName);
 
-        const auto ethHeader = parseEthernetHeader(receivedFrame);
+        const auto ethHeader = parseEthernetHeader(*receivedFrame);
         if (!ethHeader.has_value()) {
             globalMetrics().incDescartesQuadro();
             continue;
@@ -473,13 +484,13 @@ void runInterface(interface incomingInterface, ArpResolver& arpResolver) {
             handleArpFrame(
                 ethernet,
                 incomingInterface,
-                receivedFrame,
+                *receivedFrame,
                 arpResolver);
         } else if (ethHeader->etherType == 0x0800) {
             handleIPv4Frame(
                 incomingInterface,
                 *ethHeader,
-                receivedFrame,
+                *receivedFrame,
                 arpResolver);
         } else {
             globalMetrics().incDescartesQuadro();
@@ -487,9 +498,12 @@ void runInterface(interface incomingInterface, ArpResolver& arpResolver) {
     }
 }
 
-void runCacheExpiration(ArpResolver& arpResolver) {
-    while (true) {
+void runCacheExpiration(ArpResolver& arpResolver, const std::atomic<bool>& stopping) {
+    while (!stopping.load()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        if (stopping.load()) {
+            break;
+        }
         arpResolver.processTimeouts();
         arpResolver.removeExpired(std::chrono::steady_clock::now());
     }
@@ -497,10 +511,19 @@ void runCacheExpiration(ArpResolver& arpResolver) {
 
 } // namespace
 
-int main(int argc, char* argv[]) {
+int main(int argc, char* argv[]) try {
     if (argc != 2) {
         std::cerr << "Uso: " << argv[0] << " ARQUIVO_DE_CONFIGURACAO\n";
         return 1;
+    }
+
+    // As threads herdam a mascara. Somente a thread principal recebe SIGTERM.
+    sigset_t terminationSignals;
+    sigemptyset(&terminationSignals);
+    sigaddset(&terminationSignals, SIGTERM);
+    const int maskError = pthread_sigmask(SIG_BLOCK, &terminationSignals, nullptr);
+    if (maskError != 0) {
+        throw std::system_error(maskError, std::generic_category(), "pthread_sigmask");
     }
 
     loadConfig(argv[1]);
@@ -530,15 +553,56 @@ int main(int argc, char* argv[]) {
                           "arp", arpResolver, context.incomingIp);
         });
 
-    std::vector<std::thread> workers;
+    std::atomic<bool> stopping{false};
+    std::atomic<bool> failed{false};
+    const auto fail = [&](const char* reason) {
+        stopping.store(true);
+        if (!failed.exchange(true)) {
+            std::fprintf(stderr, "Erro fatal do roteador: %s\n", reason);
+        }
+    };
 
-    for (const interface& configuredInterface : allInterfaces) {
-        workers.emplace_back(runInterface, configuredInterface, std::ref(arpResolver));
+    const auto runWorker = [&](auto work) {
+        try {
+            work();
+        } catch (const std::exception& error) {
+            fail(error.what());
+        } catch (...) {
+            fail("excecao desconhecida na thread");
+        }
+    };
+
+    std::vector<std::thread> workers;
+    try {
+        for (const interface& configuredInterface : allInterfaces) {
+            workers.emplace_back(runWorker, [&, iface = &configuredInterface] {
+                runInterface(*iface, arpResolver, stopping);
+            });
+        }
+        workers.emplace_back(runWorker, [&] {
+            runCacheExpiration(arpResolver, stopping);
+        });
+    } catch (const std::exception& error) {
+        fail(error.what());
     }
 
-    workers.emplace_back(runCacheExpiration, std::ref(arpResolver));
+    while (!stopping.load()) {
+        const timespec wait{0, 100000000};
+        if (sigtimedwait(&terminationSignals, nullptr, &wait) == SIGTERM) {
+            stopping.store(true);
+        } else {
+            const int error = errno;
+            if (error != EAGAIN && error != EINTR) {
+                fail("falha em sigtimedwait");
+            }
+        }
+    }
 
     for (std::thread& worker : workers) {
         worker.join();
     }
+    return failed.load() ? 1 : 0;
+} catch (const std::exception& error) {
+    std::fprintf(stderr, "Erro fatal do roteador: %s\n", error.what());
+    return 1;
 }
