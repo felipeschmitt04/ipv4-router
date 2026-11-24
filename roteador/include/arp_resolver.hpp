@@ -95,6 +95,9 @@ private:
     ArpIcmpErrorHandler icmpErrorHandler;
 
     static constexpr std::size_t maxPacketsPerResolution = 16;
+    static constexpr auto resolutionTimeout = std::chrono::seconds(3);
+
+    void reportFailure(const PendingResolution &failed);
 
 public:
     explicit ArpResolver(
@@ -105,12 +108,12 @@ public:
     ArpResolutionResult resolve(
         std::uint32_t nextHopIp,
         const interface &outputInterface,
-        std::chrono::steady_clock::time_point now);
+        std::optional<std::chrono::steady_clock::time_point> suppliedTime = std::nullopt);
 
     void learnFromArp(
         const ArpMessage &message,
         const interface &incomingInterface,
-        std::chrono::steady_clock::time_point now);
+        std::optional<std::chrono::steady_clock::time_point> suppliedTime = std::nullopt);
 
     void removeExpired(std::chrono::steady_clock::time_point now);
 
@@ -118,12 +121,12 @@ public:
         std::uint32_t nextHopIp,
         const interface &outputInterface,
         std::vector<std::uint8_t> ipv4Packet,
-        std::chrono::steady_clock::time_point now,
+        std::optional<std::chrono::steady_clock::time_point> suppliedTime = std::nullopt,
         PacketOrigin origin = PacketOrigin::Received,
         std::optional<ReceivedPacketContext> context = std::nullopt);
 
     void processTimeouts(
-        std::chrono::steady_clock::time_point now);
+        std::optional<std::chrono::steady_clock::time_point> suppliedTime = std::nullopt);
 
     std::size_t cacheSize();
     std::size_t pendingPacketsSize();

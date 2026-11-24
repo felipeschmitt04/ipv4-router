@@ -119,7 +119,7 @@ void dispatchQueuedPacket(
         nextHopIp,
         outIface,
         pkt,
-        std::chrono::steady_clock::now(),
+        std::nullopt,
         origin,
         std::move(context));
     if (st == ArpPacketStatus::QueueFull) {
@@ -198,13 +198,11 @@ void handleArpFrame(
         return;
     }
 
-    const auto now = std::chrono::steady_clock::now();
     if (request->targetIP == incomingInterface.interfaceIpAddr &&
         request->senderIP != 0) {
         arpResolver.learnFromArp(
             *request,
-            incomingInterface,
-            now);
+            incomingInterface);
         updateArpGauges(arpResolver);
     }
 
@@ -498,9 +496,8 @@ void runInterface(interface incomingInterface, ArpResolver& arpResolver) {
 void runCacheExpiration(ArpResolver& arpResolver) {
     while (true) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        const auto now = std::chrono::steady_clock::now();
-        arpResolver.processTimeouts(now);
-        arpResolver.removeExpired(now);
+        arpResolver.processTimeouts();
+        arpResolver.removeExpired(std::chrono::steady_clock::now());
         updateArpGauges(arpResolver);
     }
 }

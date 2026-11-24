@@ -17,10 +17,11 @@ ArpResolver::ArpResolver(ArpFrameSender frameSender,
 ArpResolutionResult ArpResolver::resolve(
     std::uint32_t nextHopIp,
     const interface &outputInterface,
-    std::chrono::steady_clock::time_point now)
+    std::optional<std::chrono::steady_clock::time_point> suppliedTime)
 {
     // Serializa consulta ao cache, fila e envio de quadros.
     std::lock_guard<std::mutex> lock(pendingMutex);
+    const auto now = suppliedTime ? *suppliedTime : std::chrono::steady_clock::now();
 
     const auto learnedMac = cache.lookup(
         nextHopIp,
@@ -46,7 +47,7 @@ ArpResolutionResult ArpResolver::resolve(
     if (pending == pendingResolutions.end())
     {
         pendingResolutions.push_back(
-            {nextHopIp, outputInterface.interfaceName, outputInterface.mac, outputInterface.interfaceIpAddr, now, 1, {}});
+            {nextHopIp, outputInterface.interfaceName, outputInterface.mac, outputInterface.interfaceIpAddr, {}, 1, {}});
         shouldSendRequest = true;
     }
 
@@ -69,6 +70,8 @@ ArpResolutionResult ArpResolver::resolve(
         0x0806,
         arpPayload);
 
+    pendingResolutions.back().firstRequestAt =
+        suppliedTime ? *suppliedTime : std::chrono::steady_clock::now();
     frameSender(outputInterface.interfaceName, arpFrame);
 
     return {ArpResolutionStatus::Pending, std::nullopt};
@@ -76,10 +79,10 @@ ArpResolutionResult ArpResolver::resolve(
 
 void ArpResolver::learnFromArp(const ArpMessage &message,
                                const interface &incomingInterface,
-                               std::chrono::steady_clock::time_point now)
+                               std::optional<std::chrono::steady_clock::time_point> suppliedTime)
 {
     // Serializa consulta ao cache, fila e envio de quadros.
-    std::lock_guard<std::mutex> lock(pendingMutex);
+    std::unique_lock<std::mutex> lock(pendingMutex);
 
     if (message.targetIP != incomingInterface.interfaceIpAddr)
     {
@@ -91,14 +94,12 @@ void ArpResolver::learnFromArp(const ArpMessage &message,
         return;
     }
 
+    const auto now = suppliedTime ? *suppliedTime : std::chrono::steady_clock::now();
     cache.learn(
         message.senderIP,
         message.senderMAC,
         incomingInterface.interfaceName,
         now);
-
-    std::optional<PendingResolution> completedResolution;
-
 
     const auto pending = std::find_if(
         pendingResolutions.begin(),
@@ -109,26 +110,32 @@ void ArpResolver::learnFromArp(const ArpMessage &message,
                    entry.interfaceName == incomingInterface.interfaceName;
         });
 
-    if (pending != pendingResolutions.end())
-    {
-        completedResolution = std::move(*pending);
-        pendingResolutions.erase(pending);
-    }
-
-    if (!completedResolution.has_value())
+    if (pending == pendingResolutions.end())
     {
         return;
     }
 
-    for (const PendingPacket &packet : completedResolution->packets)
+    const auto decisionTime = suppliedTime ? *suppliedTime : std::chrono::steady_clock::now();
+    const bool expired = decisionTime - pending->firstRequestAt >= resolutionTimeout;
+    const PendingResolution resolution = std::move(*pending);
+    pendingResolutions.erase(pending);
+
+    if (expired)
+    {
+        lock.unlock();
+        reportFailure(resolution);
+        return;
+    }
+
+    for (const PendingPacket &packet : resolution.packets)
     {
         const auto ethernetFrame = buildEthernetFrame(
             message.senderMAC,
-            completedResolution->sourceMac,
+            resolution.sourceMac,
             0x0800,
             packet.ipv4Packet);
 
-        frameSender(completedResolution->interfaceName, ethernetFrame);
+        frameSender(resolution.interfaceName, ethernetFrame);
     }
 }
 
@@ -142,12 +149,13 @@ ArpPacketStatus ArpResolver::sendOrQueue(
     std::uint32_t nextHopIp,
     const interface &outputInterface,
     std::vector<std::uint8_t> ipv4Packet,
-    std::chrono::steady_clock::time_point now,
+    std::optional<std::chrono::steady_clock::time_point> suppliedTime,
     PacketOrigin origin,
     std::optional<ReceivedPacketContext> context)
 {
     // Serializa consulta ao cache, fila e envio de quadros.
     std::lock_guard<std::mutex> lock(pendingMutex);
+    const auto now = suppliedTime ? *suppliedTime : std::chrono::steady_clock::now();
 
     const auto learnedMac = cache.lookup(
         nextHopIp,
@@ -199,7 +207,7 @@ ArpPacketStatus ArpResolver::sendOrQueue(
         outputInterface.interfaceName,
         outputInterface.mac,
         outputInterface.interfaceIpAddr,
-        now,
+        {},
         1,
         {}};
 
@@ -222,26 +230,29 @@ ArpPacketStatus ArpResolver::sendOrQueue(
         0x0806,
         arpPayload);
 
+    pendingResolutions.back().firstRequestAt =
+        suppliedTime ? *suppliedTime : std::chrono::steady_clock::now();
     frameSender(outputInterface.interfaceName, arpFrame);
 
     return ArpPacketStatus::Queued;
 }
 
 void ArpResolver::processTimeouts(
-    std::chrono::steady_clock::time_point now)
+    std::optional<std::chrono::steady_clock::time_point> suppliedTime)
 {
     std::vector<ArpRequestToSend> requestsToSend;
     std::vector<PendingResolution> failedResolutions;
 
     {
         std::lock_guard<std::mutex> lock(pendingMutex);
+        const auto now = suppliedTime ? *suppliedTime : std::chrono::steady_clock::now();
 
         for (auto pending = pendingResolutions.begin();
              pending != pendingResolutions.end();)
         {
             const auto elapsed = now - pending->firstRequestAt;
 
-            if (elapsed >= std::chrono::seconds(3))
+            if (elapsed >= resolutionTimeout)
             {
                 failedResolutions.push_back(std::move(*pending));
                 pending = pendingResolutions.erase(pending);
@@ -287,36 +298,41 @@ void ArpResolver::processTimeouts(
         }
     }
 
-    // Os callbacks podem chamar sendOrQueue novamente: executar sem o mutex.
     for (const PendingResolution &failed : failedResolutions)
     {
-        logArpFalhou(failed.nextHopIp, failed.interfaceName);
+        reportFailure(failed);
+    }
+}
 
-        for (const PendingPacket &packet : failed.packets)
-        {
-            const ipv4Header header = ipv4Interpreter(packet.ipv4Packet);
-            if (header.valid)
-            {
-                logDescarte("arp", header.sourceIPAddr, header.destinationIPAddr, header.protocol);
-            }
-        }
-        
-        if (failureReporter)
-        {
-            failureReporter(failed.nextHopIp, failed.interfaceName, failed.packets.size());
-        }
+// Chamar sem pendingMutex: os callbacks podem chamar sendOrQueue novamente.
+void ArpResolver::reportFailure(const PendingResolution &failed)
+{
+    logArpFalhou(failed.nextHopIp, failed.interfaceName);
 
-        if (!icmpErrorHandler)
+    for (const PendingPacket &packet : failed.packets)
+    {
+        const ipv4Header header = ipv4Interpreter(packet.ipv4Packet);
+        if (header.valid)
         {
-            continue;
+            logDescarte("arp", header.sourceIPAddr, header.destinationIPAddr, header.protocol);
         }
+    }
 
-        for (const PendingPacket &packet : failed.packets)
+    if (failureReporter)
+    {
+        failureReporter(failed.nextHopIp, failed.interfaceName, failed.packets.size());
+    }
+
+    if (!icmpErrorHandler)
+    {
+        return;
+    }
+
+    for (const PendingPacket &packet : failed.packets)
+    {
+        if (packet.origin == PacketOrigin::Received && packet.context.has_value())
         {
-            if (packet.origin == PacketOrigin::Received && packet.context.has_value())
-            {
-                icmpErrorHandler(*packet.context);
-            }
+            icmpErrorHandler(*packet.context);
         }
     }
 }
