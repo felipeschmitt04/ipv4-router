@@ -379,8 +379,9 @@ void handleIPv4Frame(
     }
 
     const bool ethBroadcast = isBroadcastMac(ethHeader.destination);
+    const bool fragmented = rawHdr.fragmentOffset != 0 || (rawHdr.flag & 0x01u) != 0;
 
-    if (incomingInterface.interfaceName == "mgmt0") {
+    if (!fragmented && incomingInterface.interfaceName == "mgmt0") {
         std::vector<std::uint8_t> httpRespPacket;
         bool incHttp = false;
         if (handleMgmtMetricsUdpPacket(
@@ -412,6 +413,10 @@ void handleIPv4Frame(
         evaluateIPv4FilterIndexed);
 
     if (res.action == IPv4Action::Local) {
+        if (fragmented) {
+            recordLocalDiscard(rawHdr.sourceIPAddr, rawHdr.destinationIPAddr, rawHdr.protocol);
+            return;
+        }
         handleLocalPacket(
             incomingInterface,
             originalPacket,
