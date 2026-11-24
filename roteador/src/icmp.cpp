@@ -151,6 +151,7 @@ vector<uint8_t> buildICMPError(
     uint32_t source = header.sourceIPAddr;
 
     if (source == 0 ||
+        source == 0xFFFFFFFFu ||
         (source & 0xFF000000u) == 0x7F000000u ||
         (source & 0xE0000000u) == 0xE0000000u) {
         return {};

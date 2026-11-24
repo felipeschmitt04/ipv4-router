@@ -281,7 +281,7 @@ void ArpResolver::processTimeouts(
         
         if (failureReporter)
         {
-            failureReporter(failed.nextHopIp, failed.interfaceName);
+            failureReporter(failed.nextHopIp, failed.interfaceName, failed.packets.size());
         }
 
         if (!icmpErrorHandler)
@@ -316,4 +316,20 @@ void ArpResolver::processTimeouts(
 
         frameSender(request.interfaceName, arpFrame);
     }
+}
+
+std::size_t ArpResolver::cacheSize()
+{
+    return cache.size();
+}
+
+std::size_t ArpResolver::pendingPacketsSize()
+{
+    std::lock_guard<std::mutex> lock(pendingMutex);
+    std::size_t total = 0;
+    for (const auto &entry : pendingResolutions)
+    {
+        total += entry.packets.size();
+    }
+    return total;
 }

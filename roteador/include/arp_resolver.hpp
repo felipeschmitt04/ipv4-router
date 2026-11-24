@@ -12,6 +12,7 @@
 #include <mutex>
 #include <chrono>
 #include <deque>
+#include <cstddef>
 
 enum class ArpResolutionStatus
 {
@@ -44,7 +45,8 @@ using ArpFrameSender = std::function<void(
 
 using ArpFailureReporter = std::function<void(
     std::uint32_t nextHopIp,
-    const std::string &interfaceName)>;
+    const std::string &interfaceName,
+    std::size_t droppedPacketsCount)>;
 
 using ArpIcmpErrorHandler = std::function<void(
     const std::vector<std::uint8_t> &originalPacket)>;
@@ -113,4 +115,7 @@ public:
 
     void processTimeouts(
         std::chrono::steady_clock::time_point now);
+
+    std::size_t cacheSize();
+    std::size_t pendingPacketsSize();
 };
