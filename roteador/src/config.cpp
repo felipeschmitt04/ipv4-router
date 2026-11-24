@@ -249,14 +249,8 @@ void loadConfig(const string &filePath)
     {
         ++lineNum;
 
-        size_t commentPos = rawLine.find('#');
-        if (commentPos != string::npos)
-        {
-            rawLine = rawLine.substr(0, commentPos);
-        }
-
         string line = trim(rawLine);
-        if (line.empty())
+        if (line.empty() || line.front() == '#')
         {
             continue;
         }
@@ -319,10 +313,6 @@ void loadConfig(const string &filePath)
                     configError("'mgmt0' e reservado para a diretiva 'gerencia'", lineNum);
                 }
                 ++dataInterfaceCount;
-                if (dataInterfaceCount > 8)
-                {
-                    configError("Numero maximo de interfaces de dados excedido (maximo 8)", lineNum);
-                }
             }
 
             if (!seenInterfaceNames.insert(ifaceName).second)
@@ -330,7 +320,7 @@ void loadConfig(const string &filePath)
                 configError("Nome de interface duplicado: '" + ifaceName + "'", lineNum);
             }
 
-            auto [ipAddr, prefix] = parseCIDR(ipPrefix, 1, 30, false, lineNum);
+            auto [ipAddr, prefix] = parseCIDR(ipPrefix, 0, 32, false, lineNum);
             uint32_t mask = prefixToMask(prefix);
             uint32_t hostBits = ipAddr & ~mask;
 
@@ -396,11 +386,11 @@ void loadConfig(const string &filePath)
             }
 
             uint8_t protocol = 0;
-            if (tokens[2] == "icmp" || tokens[2] == "1")
+            if (tokens[2] == "icmp")
             {
                 protocol = 1;
             }
-            else if (tokens[2] == "udp" || tokens[2] == "17")
+            else if (tokens[2] == "udp")
             {
                 protocol = 17;
             }
@@ -410,7 +400,7 @@ void loadConfig(const string &filePath)
             }
             else
             {
-                configError("Protocolo invalido no filtro (esperado icmp, udp, 1, 17 ou *): '" + tokens[2] + "'", lineNum);
+                configError("Protocolo invalido no filtro (esperado icmp, udp ou *): '" + tokens[2] + "'", lineNum);
             }
 
             bool anySrc = false;
@@ -450,7 +440,7 @@ void loadConfig(const string &filePath)
             {
                 if (protocol != 17)
                 {
-                    configError("Porta numerica no filtro so e permitida quando o protocolo for 'udp' (17)", lineNum);
+                    configError("Porta numerica no filtro so e permitida quando o protocolo for 'udp'", lineNum);
                 }
                 int portVal = 0;
                 if (!parseStrictInt(tokens[5], portVal) || portVal < 1 || portVal > 65535)
@@ -520,11 +510,6 @@ void loadConfig(const string &filePath)
                 if (nextHopIP == iface.interfaceIpAddr)
                 {
                     configError("Proximo salto da rota nao pode ser o proprio IP do roteador: " + rawRoute.nextHop, rawRoute.lineNum);
-                }
-                uint32_t nhHostBits = nextHopIP & ~mask;
-                if (nhHostBits == 0u || nhHostBits == ~mask)
-                {
-                    configError("Proximo salto da rota nao pode ser endereco de rede ou broadcast: " + rawRoute.nextHop, rawRoute.lineNum);
                 }
                 outInterface = iface.interfaceName;
                 break;
