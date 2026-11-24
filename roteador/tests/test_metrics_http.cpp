@@ -190,6 +190,54 @@ int main() {
         assert(globalMetrics().snapshot(arp.entries, arp.pendingPackets).descartes_cabecalho == beforeDrops + 1);
     }
 
+    // 6. Sintaxe da requisição e precedência dos códigos HTTP.
+    {
+        struct RequestCase {
+            std::string payload;
+            std::string status;
+        };
+        const RequestCase cases[] = {
+            {"GET /metrics HTTP/1.0\r\n\r\n", "200 OK"},
+            {"GET /metrics HTTP/1.1\r\nsem dois-pontos\r\n\tvalor ignorado\r\n\r\n", "200 OK"},
+            {"GET /metrics HTTP/1.1\r\n\r\n\t\rX\n" + std::string(1, '\0'), "200 OK"},
+            {"GET outro HTTP/1.1\r\n\r\n", "404 Not Found"},
+            {"POST outro HTTP/1.1\r\n\r\n", "501 Not Implemented"},
+            {"GET /metrics HTTP/2.0\r\n\r\n", "400 Bad Request"},
+            {"GET  /metrics HTTP/1.1\r\n\r\n", "400 Bad Request"},
+            {" GET /metrics HTTP/1.1\r\n\r\n", "400 Bad Request"},
+            {"GET /metrics HTTP/1.1 \r\n\r\n", "400 Bad Request"},
+            {"GET\t/metrics HTTP/1.1\r\n\r\n", "400 Bad Request"},
+            {"GE\tT /metrics HTTP/1.1\r\n\r\n", "400 Bad Request"},
+            {"GET /met\trics HTTP/1.1\r\n\r\n", "400 Bad Request"},
+            {"GET /metrics \r\n\r\n", "400 Bad Request"},
+            {"GET /metrics extra HTTP/1.1\r\n\r\n", "400 Bad Request"},
+            {"GE\nT /metrics HTTP/1.1\r\n\r\n", "400 Bad Request"},
+            {"GET /met\rrics HTTP/1.1\r\n\r\n", "400 Bad Request"},
+            {"GET /metrics HTTP/1.1\r\nX: a\nY: b\r\n\r\n", "400 Bad Request"},
+            {"GET /metrics HTTP/1.1\r\nX: a\rY: b\r\n\r\n", "400 Bad Request"},
+            {"GET /metrics HTTP/1.1\r\nHost: mgmt0\r\n", "400 Bad Request"},
+            {"POST /metrics HTTP/1.1\r\nHost: mgmt0\n\r\n\r\n", "400 Bad Request"},
+            {"GET outro HTTP/1.0\r\nHost: mgmt0\r", "400 Bad Request"},
+        };
+
+        for (const auto& test : cases) {
+            const auto req = makeIpv4UdpPacket(clientIp, mgmtIp, 45128, 9100, test.payload);
+            std::vector<uint8_t> resp;
+            bool incHttp = false;
+            assert(handleMgmtMetricsUdpPacket(mgmtIface, req, resp, incHttp, arpResolver));
+            assert(incHttp);
+            const auto raw = extractUdpPayload(resp);
+            const auto statusLine = "HTTP/1.1 " + test.status + "\r\n";
+            if (test.status == "200 OK") {
+                assert(raw.find(statusLine) == 0);
+                assert(raw.find("\narp_entradas 1\n") != std::string::npos);
+                assert(raw.find("\narp_pendentes 2\n") != std::string::npos);
+            } else {
+                assert(raw == statusLine + "Content-Length: 0\r\n\r\n");
+            }
+        }
+    }
+
     std::cout << "test_metrics_http: todos os testes passaram!\n";
     return 0;
 }

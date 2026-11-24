@@ -63,14 +63,22 @@ std::string buildHttpResponse(
 }
 
 std::string evaluateHttpRequest(const std::string& payload, ArpResolver& arpResolver) {
-    const size_t headerEnd = payload.find("\r\n\r\n");
-    if (headerEnd == std::string::npos) {
+    const size_t firstCrlf = payload.find_first_of("\r\n");
+    if (firstCrlf == std::string::npos || firstCrlf == 0 ||
+        payload.compare(firstCrlf, 2, "\r\n") != 0) {
         return buildHttpResponse("400 Bad Request", "");
     }
 
-    const size_t firstCrlf = payload.find("\r\n");
-    if (firstCrlf == std::string::npos || firstCrlf == 0) {
-        return buildHttpResponse("400 Bad Request", "");
+    // Valida somente os delimitadores dos cabeçalhos até a primeira linha vazia.
+    for (size_t lineStart = firstCrlf + 2;;) {
+        const size_t lineEnd = payload.find_first_of("\r\n", lineStart);
+        if (lineEnd == std::string::npos || payload.compare(lineEnd, 2, "\r\n") != 0) {
+            return buildHttpResponse("400 Bad Request", "");
+        }
+        if (lineEnd == lineStart) {
+            break;
+        }
+        lineStart = lineEnd + 2;
     }
 
     const std::string requestLine = payload.substr(0, firstCrlf);
@@ -85,7 +93,9 @@ std::string evaluateHttpRequest(const std::string& payload, ArpResolver& arpReso
         return buildHttpResponse("400 Bad Request", "");
     }
 
-    if (requestLine.find(' ', sp2 + 1) != std::string::npos) {
+    if (sp2 + 1 == requestLine.size() ||
+        requestLine.find(' ', sp2 + 1) != std::string::npos ||
+        requestLine.find('\t') != std::string::npos) {
         return buildHttpResponse("400 Bad Request", "");
     }
 
