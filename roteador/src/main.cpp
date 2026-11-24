@@ -16,15 +16,21 @@
 #include <chrono>
 #include <cstdint>
 #include <iostream>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 namespace {
 
 std::mutex sendMutex;
+
+// Mantem um socket Ethernet persistente por interface.
+std::unordered_map<std::string, std::unique_ptr<EthernetInterface>>
+    ethernetInterfaces;
 
 std::optional<interface> findInterface(const std::string& name) {
     for (const auto& iface : allInterfaces) {
@@ -98,10 +104,7 @@ void sendFrame(
 void sendFrameByName(
     const std::string& ifaceName,
     const std::vector<std::uint8_t>& frame) {
-    std::lock_guard<std::mutex> lock(sendMutex);
-    EthernetInterface output(ifaceName);
-    output.send(frame);
-    globalMetrics().incQuadrosEnviados(ifaceName);
+    sendFrame(*ethernetInterfaces.at(ifaceName), ifaceName, frame);
 }
 
 void dispatchQueuedPacket(
@@ -461,7 +464,8 @@ void handleIPv4Frame(
 }
 
 void runInterface(interface incomingInterface, ArpResolver& arpResolver) {
-    EthernetInterface ethernet(incomingInterface.interfaceName);
+    EthernetInterface& ethernet =
+        *ethernetInterfaces.at(incomingInterface.interfaceName);
 
     while (true) {
         const ReceivedFrame receivedFrame = ethernet.receive();
@@ -516,6 +520,15 @@ int main(int argc, char* argv[]) {
     }
 
     loadConfig(argv[1]);
+
+    // Cria os sockets Ethernet antes de iniciar as threads.
+    for (const interface& configuredInterface : allInterfaces) {
+        ethernetInterfaces.emplace(
+            configuredInterface.interfaceName,
+            std::make_unique<EthernetInterface>(
+                configuredInterface.interfaceName));
+    }
+
     logInicio(routerName);
 
     ArpResolver arpResolver(
