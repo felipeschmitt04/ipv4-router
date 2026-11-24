@@ -244,6 +244,9 @@ void handleLocalPacket(
     const bool isMgmtIp = mgmtIface.has_value() &&
         rawHdr.destinationIPAddr == mgmtIface->interfaceIpAddr;
 
+    const bool crossesMgmtBoundary =
+        (incomingInterface.interfaceName == "mgmt0") != isMgmtIp;
+
     if (rawHdr.protocol == 1) {
         const size_t ipHdrLen = static_cast<size_t>(rawHdr.IHL) * 4u;
         if (rawHdr.totalLength < ipHdrLen + 8u || ipv4Packet.size() < rawHdr.totalLength) {
@@ -260,6 +263,11 @@ void handleLocalPacket(
             return;
         }
 
+        if (crossesMgmtBoundary) {
+            recordLocalDiscard(rawHdr.sourceIPAddr, rawHdr.destinationIPAddr, rawHdr.protocol, true);
+            return;
+        }
+
         if (icmp.valid && icmp.type == 8 && icmp.code == 0) {
             const std::vector<std::uint8_t> echoReply = buildICMPEchoReply(ipv4Packet);
             if (!echoReply.empty()) {
@@ -272,11 +280,6 @@ void handleLocalPacket(
                         0x0800,
                         echoReply);
                     sendFrame(ethernet, "mgmt0", outFrame);
-                    return;
-                }
-
-                if (isMgmtIp) {
-                    recordLocalDiscard(rawHdr.sourceIPAddr, rawHdr.destinationIPAddr, rawHdr.protocol, true);
                     return;
                 }
 
@@ -321,7 +324,6 @@ void handleLocalPacket(
             ipv4Packet.begin() + static_cast<ptrdiff_t>(ipHdrLen),
             ipv4Packet.begin() + static_cast<ptrdiff_t>(rawHdr.totalLength));
 
-        const uint16_t udpDstPort = (static_cast<uint16_t>(udpSeg[2]) << 8) | udpSeg[3];
         const uint16_t udpLen = (static_cast<uint16_t>(udpSeg[4]) << 8) | udpSeg[5];
         const uint16_t udpCsum = (static_cast<uint16_t>(udpSeg[6]) << 8) | udpSeg[7];
 
@@ -336,10 +338,7 @@ void handleLocalPacket(
             return;
         }
 
-        const bool targetsMgmtIp = mgmtIface.has_value() &&
-            rawHdr.destinationIPAddr == mgmtIface->interfaceIpAddr;
-
-        if (incomingInterface.interfaceName != "mgmt0" && targetsMgmtIp && udpDstPort == 9100u) {
+        if (crossesMgmtBoundary) {
             recordLocalDiscard(rawHdr.sourceIPAddr, rawHdr.destinationIPAddr, rawHdr.protocol, true);
             return;
         }
