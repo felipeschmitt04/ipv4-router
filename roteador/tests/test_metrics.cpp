@@ -50,7 +50,7 @@ void testInitialZeroesAndOrder() {
         "# TYPE descartes_local counter\n"
         "descartes_local 0\n";
 
-    assert(m.renderPrometheus() == expected);
+    assert(m.renderPrometheus(0, 0) == expected);
 }
 
 void testCountersGaugesAndSizeLimit() {
@@ -62,15 +62,14 @@ void testCountersGaugesAndSizeLimit() {
     m.incIcmpGerados(2);
     m.incRespostasHttp(1);
 
-    m.setArpEntradas(4);
-    m.setArpPendentes(2);
-    m.setArpEntradas(1);
-    m.setArpPendentes(0);
+    const auto before = m.snapshot(4, 2);
+    assert(before.arp_entradas == 4);
+    assert(before.arp_pendentes == 2);
 
     m.incDescartePorMotivo("ttl");
     m.incDescartePorMotivo("filtro", 2);
 
-    const MetricsSnapshot s = m.snapshot();
+    const MetricsSnapshot s = m.snapshot(1, 0);
     assert(s.quadros_recebidos_eth0 == 2);
     assert(s.quadros_enviados_eth1 == 3);
     assert(s.quadros_recebidos_mgmt0 == 1);
@@ -82,7 +81,7 @@ void testCountersGaugesAndSizeLimit() {
     assert(s.descartes_ttl == 1);
     assert(s.descartes_filtro == 2);
 
-    const std::string body = m.renderPrometheus();
+    const std::string body = m.renderPrometheus(1, 0);
     assert(body.find("arp_entradas 1\n") != std::string::npos);
     assert(body.find("arp_pendentes 0\n") != std::string::npos);
     assert(body.find("descartes_filtro 2\n") != std::string::npos);
@@ -108,7 +107,7 @@ void testConcurrentIncrements() {
         t.join();
     }
 
-    const MetricsSnapshot s = m.snapshot();
+    const MetricsSnapshot s = m.snapshot(0, 0);
     assert(s.pacotes_encaminhados == numThreads * iterations);
     assert(s.descartes_local == numThreads * iterations);
 }

@@ -41,9 +41,6 @@ public:
     void incIcmpGerados(std::uint64_t delta = 1);
     void incRespostasHttp(std::uint64_t delta = 1);
 
-    void setArpEntradas(std::uint64_t value);
-    void setArpPendentes(std::uint64_t value);
-
     void incDescartesQuadro(std::uint64_t delta = 1);
     void incDescartesCabecalho(std::uint64_t delta = 1);
     void incDescartesTtl(std::uint64_t delta = 1);
@@ -55,8 +52,8 @@ public:
 
     void incDescartePorMotivo(std::string_view motivo, std::uint64_t delta = 1);
 
-    MetricsSnapshot snapshot() const;
-    std::string renderPrometheus() const;
+    MetricsSnapshot snapshot(std::uint64_t arpEntries, std::uint64_t arpPendingPackets) const;
+    std::string renderPrometheus(std::uint64_t arpEntries, std::uint64_t arpPendingPackets) const;
 
 private:
     std::atomic<std::uint64_t> quadros_recebidos_eth0_{0};
@@ -69,9 +66,6 @@ private:
     std::atomic<std::uint64_t> pacotes_encaminhados_{0};
     std::atomic<std::uint64_t> icmp_gerados_{0};
     std::atomic<std::uint64_t> respostas_http_{0};
-
-    std::atomic<std::uint64_t> arp_entradas_{0};
-    std::atomic<std::uint64_t> arp_pendentes_{0};
 
     std::atomic<std::uint64_t> descartes_quadro_{0};
     std::atomic<std::uint64_t> descartes_cabecalho_{0};

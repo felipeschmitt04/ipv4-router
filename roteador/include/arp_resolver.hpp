@@ -58,6 +58,12 @@ struct ReceivedPacketContext
 using ArpIcmpErrorHandler = std::function<void(
     const ReceivedPacketContext &context)>;
 
+struct ArpStateSnapshot
+{
+    std::size_t entries;
+    std::size_t pendingPackets;
+};
+
 class ArpResolver
 {
 private:
@@ -98,6 +104,7 @@ private:
     static constexpr auto resolutionTimeout = std::chrono::seconds(3);
 
     void reportFailure(const PendingResolution &failed);
+    std::size_t pendingPacketsSizeLocked() const;
 
 public:
     explicit ArpResolver(
@@ -130,4 +137,5 @@ public:
 
     std::size_t cacheSize();
     std::size_t pendingPacketsSize();
+    ArpStateSnapshot snapshot();
 };

@@ -346,6 +346,17 @@ std::size_t ArpResolver::cacheSize()
 std::size_t ArpResolver::pendingPacketsSize()
 {
     std::lock_guard<std::mutex> lock(pendingMutex);
+    return pendingPacketsSizeLocked();
+}
+
+ArpStateSnapshot ArpResolver::snapshot()
+{
+    std::lock_guard<std::mutex> lock(pendingMutex);
+    return {cache.size(), pendingPacketsSizeLocked()};
+}
+
+std::size_t ArpResolver::pendingPacketsSizeLocked() const
+{
     std::size_t total = 0;
     for (const auto &entry : pendingResolutions)
     {

@@ -1,4 +1,5 @@
 #include "../include/metrics_http.hpp"
+#include "../include/arp_resolver.hpp"
 #include "../include/ipv4.hpp"
 #include "../include/metrics.hpp"
 
@@ -61,7 +62,7 @@ std::string buildHttpResponse(
     return resp;
 }
 
-std::string evaluateHttpRequest(const std::string& payload) {
+std::string evaluateHttpRequest(const std::string& payload, ArpResolver& arpResolver) {
     const size_t headerEnd = payload.find("\r\n\r\n");
     if (headerEnd == std::string::npos) {
         return buildHttpResponse("400 Bad Request", "");
@@ -104,7 +105,8 @@ std::string evaluateHttpRequest(const std::string& payload) {
         return buildHttpResponse("404 Not Found", "");
     }
 
-    const std::string body = globalMetrics().renderPrometheus();
+    const ArpStateSnapshot arp = arpResolver.snapshot();
+    const std::string body = globalMetrics().renderPrometheus(arp.entries, arp.pendingPackets);
     return buildHttpResponse("200 OK", body);
 }
 
@@ -177,7 +179,8 @@ bool handleMgmtMetricsUdpPacket(
     const interface& mgmtInterface,
     const std::vector<uint8_t>& ipv4Packet,
     std::vector<uint8_t>& outIpv4ResponsePacket,
-    bool& outIncrementHttpResponses
+    bool& outIncrementHttpResponses,
+    ArpResolver& arpResolver
 ) {
     outIpv4ResponsePacket.clear();
     outIncrementHttpResponses = false;
@@ -243,7 +246,7 @@ bool handleMgmtMetricsUdpPacket(
         exactUdp.end()
     );
 
-    const std::string httpResponse = evaluateHttpRequest(httpPayload);
+    const std::string httpResponse = evaluateHttpRequest(httpPayload, arpResolver);
     outIpv4ResponsePacket = buildIpv4UdpDatagram(
         mgmtInterface.interfaceIpAddr,
         hdr.sourceIPAddr,

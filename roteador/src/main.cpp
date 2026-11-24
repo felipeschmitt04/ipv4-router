@@ -88,11 +88,6 @@ void recordLocalDiscard(
     logDescarte("local", srcIp, dstIp, protocol);
 }
 
-void updateArpGauges(ArpResolver& arpResolver) {
-    globalMetrics().setArpEntradas(arpResolver.cacheSize());
-    globalMetrics().setArpPendentes(arpResolver.pendingPacketsSize());
-}
-
 void sendFrame(
     EthernetInterface& ethernet,
     const std::string& ifaceName,
@@ -125,7 +120,6 @@ void dispatchQueuedPacket(
     if (st == ArpPacketStatus::QueueFull) {
         globalMetrics().incDescartePorMotivo("fila_arp");
     }
-    updateArpGauges(arpResolver);
 }
 
 void sendIcmpError(
@@ -203,7 +197,6 @@ void handleArpFrame(
         arpResolver.learnFromArp(
             *request,
             incomingInterface);
-        updateArpGauges(arpResolver);
     }
 
     if (!shouldReplyToArpRequest(
@@ -387,7 +380,8 @@ void handleIPv4Frame(
                 incomingInterface,
                 ipv4Packet,
                 httpRespPacket,
-                incHttp)) {
+                incHttp,
+                arpResolver)) {
             if (!httpRespPacket.empty()) {
                 if (incHttp) {
                     globalMetrics().incRespostasHttp();
@@ -498,7 +492,6 @@ void runCacheExpiration(ArpResolver& arpResolver) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         arpResolver.processTimeouts();
         arpResolver.removeExpired(std::chrono::steady_clock::now());
-        updateArpGauges(arpResolver);
     }
 }
 

@@ -55,14 +55,6 @@ void RouterMetrics::incRespostasHttp(std::uint64_t delta) {
     addCounter(respostas_http_, delta);
 }
 
-void RouterMetrics::setArpEntradas(std::uint64_t value) {
-    arp_entradas_.store(value, std::memory_order_relaxed);
-}
-
-void RouterMetrics::setArpPendentes(std::uint64_t value) {
-    arp_pendentes_.store(value, std::memory_order_relaxed);
-}
-
 void RouterMetrics::incDescartesQuadro(std::uint64_t delta) {
     addCounter(descartes_quadro_, delta);
 }
@@ -115,7 +107,7 @@ void RouterMetrics::incDescartePorMotivo(std::string_view motivo, std::uint64_t 
     }
 }
 
-MetricsSnapshot RouterMetrics::snapshot() const {
+MetricsSnapshot RouterMetrics::snapshot(std::uint64_t arpEntries, std::uint64_t arpPendingPackets) const {
     MetricsSnapshot s;
     s.quadros_recebidos_eth0 = quadros_recebidos_eth0_.load(std::memory_order_relaxed);
     s.quadros_enviados_eth0 = quadros_enviados_eth0_.load(std::memory_order_relaxed);
@@ -128,8 +120,8 @@ MetricsSnapshot RouterMetrics::snapshot() const {
     s.icmp_gerados = icmp_gerados_.load(std::memory_order_relaxed);
     s.respostas_http = respostas_http_.load(std::memory_order_relaxed);
 
-    s.arp_entradas = arp_entradas_.load(std::memory_order_relaxed);
-    s.arp_pendentes = arp_pendentes_.load(std::memory_order_relaxed);
+    s.arp_entradas = arpEntries;
+    s.arp_pendentes = arpPendingPackets;
 
     s.descartes_quadro = descartes_quadro_.load(std::memory_order_relaxed);
     s.descartes_cabecalho = descartes_cabecalho_.load(std::memory_order_relaxed);
@@ -142,8 +134,8 @@ MetricsSnapshot RouterMetrics::snapshot() const {
     return s;
 }
 
-std::string RouterMetrics::renderPrometheus() const {
-    const MetricsSnapshot s = snapshot();
+std::string RouterMetrics::renderPrometheus(std::uint64_t arpEntries, std::uint64_t arpPendingPackets) const {
+    const MetricsSnapshot s = snapshot(arpEntries, arpPendingPackets);
     std::ostringstream out;
 
     appendMetric(out, "quadros_recebidos_eth0", "counter", s.quadros_recebidos_eth0);

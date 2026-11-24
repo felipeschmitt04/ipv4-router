@@ -1,3 +1,4 @@
+#include "../include/arp_resolver.hpp"
 #include "../include/interface.hpp"
 #include "../include/ipv4.hpp"
 #include "../include/metrics.hpp"
@@ -113,14 +114,27 @@ int main() {
     mgmtIface.prefixLength = 24;
     mgmtIface.mac = {0x02, 0x00, 0x00, 0x00, 0x00, 0x01};
 
+    ArpResolver arpResolver([](const auto&, const auto&) {});
+    const auto now = std::chrono::steady_clock::time_point{};
+    ArpMessage reply{};
+    reply.operation = 2;
+    reply.senderIP = clientIp;
+    reply.senderMAC = {0x02, 0x00, 0x00, 0x00, 0x00, 0x02};
+    reply.targetIP = mgmtIp;
+    arpResolver.learnFromArp(reply, mgmtIface, now);
+
     globalMetrics().incPacotesEncaminhados(7);
 
     // 1. GET /metrics HTTP/1.1 -> 200 OK
     {
         const auto req = makeIpv4UdpPacket(clientIp, mgmtIp, 45123, 9100, "GET /metrics HTTP/1.1\r\nHost: mgmt0\r\n\r\n");
+        const auto unresolvedIp = clientIp + 1;
+        const auto pendingPacket = makeIpv4UdpPacket(mgmtIp, unresolvedIp, 9100, 45123, "");
+        assert(arpResolver.sendOrQueue(unresolvedIp, mgmtIface, pendingPacket, now) == ArpPacketStatus::Queued);
+        assert(arpResolver.sendOrQueue(unresolvedIp, mgmtIface, pendingPacket, now) == ArpPacketStatus::Queued);
         std::vector<uint8_t> resp;
         bool incHttp = false;
-        const bool handled = handleMgmtMetricsUdpPacket(mgmtIface, req, resp, incHttp);
+        const bool handled = handleMgmtMetricsUdpPacket(mgmtIface, req, resp, incHttp, arpResolver);
         assert(handled);
         assert(incHttp);
         assert(!resp.empty());
@@ -129,6 +143,8 @@ int main() {
         assert(raw.find("HTTP/1.1 200 OK\r\n") == 0);
         assert(raw.find("Content-Type: text/plain; version=0.0.4\r\n") != std::string::npos);
         assert(raw.find("pacotes_encaminhados 7\n") != std::string::npos);
+        assert(raw.find("# TYPE arp_entradas gauge\narp_entradas 1\n") != std::string::npos);
+        assert(raw.find("# TYPE arp_pendentes gauge\narp_pendentes 2\n") != std::string::npos);
     }
 
     // 2. GET /outro HTTP/1.1 -> 404 Not Found
@@ -136,7 +152,7 @@ int main() {
         const auto req = makeIpv4UdpPacket(clientIp, mgmtIp, 45124, 9100, "GET /outro HTTP/1.1\r\n\r\n");
         std::vector<uint8_t> resp;
         bool incHttp = false;
-        assert(handleMgmtMetricsUdpPacket(mgmtIface, req, resp, incHttp));
+        assert(handleMgmtMetricsUdpPacket(mgmtIface, req, resp, incHttp, arpResolver));
         assert(incHttp);
         assert(extractUdpPayload(resp) == "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
     }
@@ -146,7 +162,7 @@ int main() {
         const auto req = makeIpv4UdpPacket(clientIp, mgmtIp, 45125, 9100, "POST /metrics HTTP/1.1\r\n\r\n");
         std::vector<uint8_t> resp;
         bool incHttp = false;
-        assert(handleMgmtMetricsUdpPacket(mgmtIface, req, resp, incHttp));
+        assert(handleMgmtMetricsUdpPacket(mgmtIface, req, resp, incHttp, arpResolver));
         assert(incHttp);
         assert(extractUdpPayload(resp) == "HTTP/1.1 501 Not Implemented\r\nContent-Length: 0\r\n\r\n");
     }
@@ -156,21 +172,22 @@ int main() {
         const auto req = makeIpv4UdpPacket(clientIp, mgmtIp, 45126, 9100, "GET /metrics HTTP/1.1\r\n");
         std::vector<uint8_t> resp;
         bool incHttp = false;
-        assert(handleMgmtMetricsUdpPacket(mgmtIface, req, resp, incHttp));
+        assert(handleMgmtMetricsUdpPacket(mgmtIface, req, resp, incHttp, arpResolver));
         assert(incHttp);
         assert(extractUdpPayload(resp) == "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n");
     }
 
     // 5. Checksum UDP inválido -> descarte cabecalho sem resposta
     {
-        const uint64_t beforeDrops = globalMetrics().snapshot().descartes_cabecalho;
+        const auto arp = arpResolver.snapshot();
+        const uint64_t beforeDrops = globalMetrics().snapshot(arp.entries, arp.pendingPackets).descartes_cabecalho;
         const auto req = makeIpv4UdpPacket(clientIp, mgmtIp, 45127, 9100, "GET /metrics HTTP/1.1\r\n\r\n", true);
         std::vector<uint8_t> resp;
         bool incHttp = false;
-        assert(handleMgmtMetricsUdpPacket(mgmtIface, req, resp, incHttp));
+        assert(handleMgmtMetricsUdpPacket(mgmtIface, req, resp, incHttp, arpResolver));
         assert(!incHttp);
         assert(resp.empty());
-        assert(globalMetrics().snapshot().descartes_cabecalho == beforeDrops + 1);
+        assert(globalMetrics().snapshot(arp.entries, arp.pendingPackets).descartes_cabecalho == beforeDrops + 1);
     }
 
     std::cout << "test_metrics_http: todos os testes passaram!\n";
