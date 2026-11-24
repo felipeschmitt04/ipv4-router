@@ -139,64 +139,54 @@ void sendIcmpError(
         return;
     }
 
-    if (fromMgmt) {
-        const auto mgmtIface = findMgmtInterface();
-        if (!mgmtIface.has_value()) {
-            return;
+    // O 3/1 ainda nao possui o contexto da interface de chegada.
+    // A etapa seguinte preservara esse contexto na fila ARP.
+    std::uint32_t srcIp = overrideSrcIp.value_or(0u);
+    if (!overrideSrcIp.has_value()) {
+        const forwardingResult fallback = forwarding(
+            origHdr.sourceIPAddr, allInterfaces, routeTable);
+        if (fallback.found) {
+            const auto iface = findInterface(fallback.interfaceName);
+            if (iface.has_value()) {
+                srcIp = iface->interfaceIpAddr;
+            }
+        } else if (!allInterfaces.empty()) {
+            srcIp = allInterfaces.front().interfaceIpAddr;
         }
-        const std::uint32_t srcIp = overrideSrcIp.value_or(mgmtIface->interfaceIpAddr);
-        const auto icmpPkt = buildICMPError(
-            originalPacket, type, code, srcIp, ethBroadcast, dropReason);
-        if (icmpPkt.empty()) {
-            return;
-        }
-        globalMetrics().incIcmpGerados();
-        dispatchQueuedPacket(
-            arpResolver, origHdr.sourceIPAddr, *mgmtIface,
-            icmpPkt, PacketOrigin::Generated);
-        return;
     }
 
-    const forwardingResult route = forwarding(
-        origHdr.sourceIPAddr,
-        allInterfaces,
-        routeTable);
-    if (!route.found) {
-        const std::uint32_t localSrc = overrideSrcIp.has_value()
-            ? *overrideSrcIp
-            : (allInterfaces.empty() ? 0u : allInterfaces.front().interfaceIpAddr);
-        globalMetrics().incDescartePorMotivo("sem_rota");
-        logDescarte("sem_rota", localSrc, origHdr.sourceIPAddr, 1);
-        return;
-    }
-
-    const auto outIface = findInterface(route.interfaceName);
-    if (!outIface.has_value()) {
-        return;
-    }
-
-    const std::uint32_t srcIp = overrideSrcIp.has_value()
-        ? *overrideSrcIp
-        : outIface->interfaceIpAddr;
-
-    const std::vector<std::uint8_t> icmpPkt = buildICMPError(
-        originalPacket,
-        type,
-        code,
-        srcIp,
-        ethBroadcast,
-        dropReason);
+    const auto icmpPkt = buildICMPError(
+        originalPacket, type, code, srcIp, ethBroadcast, dropReason);
     if (icmpPkt.empty()) {
         return;
     }
 
     globalMetrics().incIcmpGerados();
-    dispatchQueuedPacket(
-        arpResolver,
-        route.nextHop,
-        *outIface,
-        icmpPkt,
-        PacketOrigin::Generated);
+
+    if (fromMgmt) {
+        const auto mgmtIface = findMgmtInterface();
+        if (mgmtIface.has_value()) {
+            dispatchQueuedPacket(
+                arpResolver, origHdr.sourceIPAddr, *mgmtIface,
+                icmpPkt, PacketOrigin::Generated);
+        }
+        return;
+    }
+
+    const forwardingResult route = forwarding(
+        origHdr.sourceIPAddr, allInterfaces, routeTable);
+    if (!route.found) {
+        globalMetrics().incDescartePorMotivo("sem_rota");
+        logDescarte("sem_rota", srcIp, origHdr.sourceIPAddr, 1);
+        return;
+    }
+
+    const auto outIface = findInterface(route.interfaceName);
+    if (outIface.has_value()) {
+        dispatchQueuedPacket(
+            arpResolver, route.nextHop, *outIface,
+            icmpPkt, PacketOrigin::Generated);
+    }
 }
 
 void handleArpFrame(
@@ -288,9 +278,9 @@ void handleLocalPacket(
         if (icmp.valid && icmp.type == 8 && icmp.code == 0) {
             const std::vector<std::uint8_t> echoReply = buildICMPEchoReply(ipv4Packet);
             if (!echoReply.empty()) {
+                globalMetrics().incIcmpGerados();
                 if (incomingInterface.interfaceName == "mgmt0" &&
                     rawHdr.destinationIPAddr == incomingInterface.interfaceIpAddr) {
-                    globalMetrics().incIcmpGerados();
                     dispatchQueuedPacket(
                         arpResolver,
                         rawHdr.sourceIPAddr,
@@ -307,7 +297,6 @@ void handleLocalPacket(
                 if (route.found) {
                     const auto outIface = findInterface(route.interfaceName);
                     if (outIface.has_value()) {
-                        globalMetrics().incIcmpGerados();
                         dispatchQueuedPacket(
                             arpResolver,
                             route.nextHop,
@@ -318,7 +307,6 @@ void handleLocalPacket(
                     }
                 } else {
                     // Resposta gerada, mas sem rota para enviá-la.
-                    globalMetrics().incIcmpGerados();
                     globalMetrics().incDescartePorMotivo("sem_rota");
                     logDescarte("sem_rota", rawHdr.destinationIPAddr, rawHdr.sourceIPAddr, 1);
                     return;
@@ -453,13 +441,15 @@ void handleIPv4Frame(
 
     if (res.action == IPv4Action::TTLExpired) {
         globalMetrics().incDescartePorMotivo("ttl");
-        sendIcmpError(originalPacket, 11, 0, ethBroadcast, "ttl", arpResolver);
+        sendIcmpError(originalPacket, 11, 0, ethBroadcast, "ttl", arpResolver,
+                      incomingInterface.interfaceIpAddr);
         return;
     }
 
     if (res.action == IPv4Action::NoRoute) {
         globalMetrics().incDescartePorMotivo("sem_rota");
-        sendIcmpError(originalPacket, 3, 0, ethBroadcast, "sem_rota", arpResolver);
+        sendIcmpError(originalPacket, 3, 0, ethBroadcast, "sem_rota", arpResolver,
+                      incomingInterface.interfaceIpAddr);
         return;
     }
 
