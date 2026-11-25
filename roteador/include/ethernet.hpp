@@ -4,6 +4,7 @@
 #include <vector>
 #include <array>
 #include <optional>
+#include <atomic>
 
 struct ReceivedFrame
 {
@@ -41,6 +42,8 @@ private:
   int fileDescriptor = -1;         // numero inteiro retornado pelo Linux quando o socket é criado
   std::string interfaceName;       // nome da interface
   unsigned int interfaceIndex = 0; // identificador da interface usado pelo Linux
+  std::atomic_flag receiveErrorReported = ATOMIC_FLAG_INIT;
+  std::atomic_flag sendErrorReported = ATOMIC_FLAG_INIT;
 
 public:
   EthernetInterface(const std::string &interface_name);
@@ -49,7 +52,7 @@ public:
   EthernetInterface(const EthernetInterface &) = delete;            // construtor de copia
   EthernetInterface &operator=(const EthernetInterface &) = delete; // operador de atribuição por copia
 
-  ReceivedFrame receive();
+  std::optional<ReceivedFrame> receive();
 
-  void send(const std::vector<std::uint8_t> &frame);
+  bool send(const std::vector<std::uint8_t> &frame);
 };

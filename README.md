@@ -14,20 +14,53 @@ Docker Engine 28 ou mais recente, com Docker Compose 2.36 ou mais recente. No Wi
    docker compose up -d --build
    ```
 
-2. Enquanto não houver o executável `roteador` em `roteador/`, as máquinas r1, r2 e r3 ficam no ar sem roteador, e `docker compose logs r1` diz isso. Já dá para observar a rede: `docker exec h1 ping -c 3 10.0.1.1` fica sem resposta, e `docker exec -it r1 tcpdump -n -e -i eth0` mostra as requisições ARP de h1.
+2. O executável `roteador/roteador` não é versionado. Cada contêiner copia os fontes e executa `build.sh` na própria cópia ao iniciar. Se o build falhar, a máquina continua no ar e `docker compose logs r1` mostra o erro. Para observar o enlace, use `docker exec -it r1 tcpdump -n -e -i eth0`.
 
-3. Escreva o programa em `roteador/`, só com a biblioteca padrão da linguagem, sem pacotes de terceiros. Em Python, `roteador` pode ser o próprio script, começando por `#!/usr/bin/env python3`. Em C, C++ ou outra linguagem compilada, um `build.sh` gera o executável `roteador`. A cada mudança no código:
+3. O código em `roteador/` usa C++17, a biblioteca padrão e as interfaces do sistema Linux. A cada mudança no código, reinicie os roteadores para recompilar:
 
    ```text
    docker compose restart r1 r2 r3
    docker compose logs -f r1
    ```
 
-4. Rode os testes automáticos, que mostram o que já funciona e o que falta, agrupados por parte do roteador:
+4. Rode os 51 testes oficiais do professor, agrupados por parte do roteador:
 
    ```text
    docker compose run --rm testes
    ```
+
+## Compilação e execução manual
+
+Em Linux, com G++ e os cabeçalhos do sistema disponíveis, execute a partir da raiz do repositório:
+
+```sh
+cd roteador
+sh build.sh
+sudo ./roteador ../configuracao/r1.conf
+```
+
+O último comando pressupõe um ambiente isolado com as interfaces declaradas no arquivo de configuração. O processo precisa de privilégios para abrir sockets brutos `AF_PACKET` (`CAP_NET_RAW`, normalmente disponível ao executar como root). A topologia Docker já prepara as interfaces e concede os privilégios necessários.
+
+## Testes do grupo
+
+Os testes locais estão em `roteador/tests/`. Em Linux, execute a partir de `roteador/` para que o teste de configuração encontre `../configuracao/`:
+
+```sh
+test_dir=$(mktemp -d)
+set --
+for source in src/*.cpp; do
+    [ "$source" = src/main.cpp ] || set -- "$@" "$source"
+done
+for test in tests/*.cpp; do
+    name=$(basename "$test" .cpp)
+    g++ -std=c++17 -pthread -Iinclude "$test" "$@" -o "$test_dir/$name" || exit 1
+    if [ "$name" != test_send ]; then
+        "$test_dir/$name" || exit 1
+    fi
+done
+```
+
+`test_send` é compilado pelo laço e executado separadamente. Ele transmite um quadro bruto pela `eth0`. Use somente um ambiente isolado, com `eth0` de teste e um par adequado para capturar o quadro, e execute `sudo "$test_dir/test_send"`.
 
 ## O que há aqui
 

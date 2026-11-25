@@ -1,4 +1,5 @@
 #include "../include/metrics_http.hpp"
+#include "../include/arp_resolver.hpp"
 #include "../include/ipv4.hpp"
 #include "../include/metrics.hpp"
 
@@ -61,15 +62,23 @@ std::string buildHttpResponse(
     return resp;
 }
 
-std::string evaluateHttpRequest(const std::string& payload) {
-    const size_t headerEnd = payload.find("\r\n\r\n");
-    if (headerEnd == std::string::npos) {
+std::string evaluateHttpRequest(const std::string& payload, ArpResolver& arpResolver) {
+    const size_t firstCrlf = payload.find_first_of("\r\n");
+    if (firstCrlf == std::string::npos || firstCrlf == 0 ||
+        payload.compare(firstCrlf, 2, "\r\n") != 0) {
         return buildHttpResponse("400 Bad Request", "");
     }
 
-    const size_t firstCrlf = payload.find("\r\n");
-    if (firstCrlf == std::string::npos || firstCrlf == 0) {
-        return buildHttpResponse("400 Bad Request", "");
+    // Valida somente os delimitadores dos cabeçalhos até a primeira linha vazia.
+    for (size_t lineStart = firstCrlf + 2;;) {
+        const size_t lineEnd = payload.find_first_of("\r\n", lineStart);
+        if (lineEnd == std::string::npos || payload.compare(lineEnd, 2, "\r\n") != 0) {
+            return buildHttpResponse("400 Bad Request", "");
+        }
+        if (lineEnd == lineStart) {
+            break;
+        }
+        lineStart = lineEnd + 2;
     }
 
     const std::string requestLine = payload.substr(0, firstCrlf);
@@ -84,17 +93,15 @@ std::string evaluateHttpRequest(const std::string& payload) {
         return buildHttpResponse("400 Bad Request", "");
     }
 
-    if (requestLine.find(' ', sp2 + 1) != std::string::npos) {
+    if (sp2 + 1 == requestLine.size() ||
+        requestLine.find(' ', sp2 + 1) != std::string::npos ||
+        requestLine.find('\t') != std::string::npos) {
         return buildHttpResponse("400 Bad Request", "");
     }
 
     const std::string method = requestLine.substr(0, sp1);
     const std::string target = requestLine.substr(sp1 + 1, sp2 - (sp1 + 1));
     const std::string version = requestLine.substr(sp2 + 1);
-
-    if (target.empty() || target[0] != '/') {
-        return buildHttpResponse("400 Bad Request", "");
-    }
 
     if (version != "HTTP/1.1" && version != "HTTP/1.0") {
         return buildHttpResponse("400 Bad Request", "");
@@ -108,7 +115,8 @@ std::string evaluateHttpRequest(const std::string& payload) {
         return buildHttpResponse("404 Not Found", "");
     }
 
-    const std::string body = globalMetrics().renderPrometheus();
+    const ArpStateSnapshot arp = arpResolver.snapshot();
+    const std::string body = globalMetrics().renderPrometheus(arp.entries, arp.pendingPackets);
     return buildHttpResponse("200 OK", body);
 }
 
@@ -181,7 +189,8 @@ bool handleMgmtMetricsUdpPacket(
     const interface& mgmtInterface,
     const std::vector<uint8_t>& ipv4Packet,
     std::vector<uint8_t>& outIpv4ResponsePacket,
-    bool& outIncrementHttpResponses
+    bool& outIncrementHttpResponses,
+    ArpResolver& arpResolver
 ) {
     outIpv4ResponsePacket.clear();
     outIncrementHttpResponses = false;
@@ -247,7 +256,7 @@ bool handleMgmtMetricsUdpPacket(
         exactUdp.end()
     );
 
-    const std::string httpResponse = evaluateHttpRequest(httpPayload);
+    const std::string httpResponse = evaluateHttpRequest(httpPayload, arpResolver);
     outIpv4ResponsePacket = buildIpv4UdpDatagram(
         mgmtInterface.interfaceIpAddr,
         hdr.sourceIPAddr,

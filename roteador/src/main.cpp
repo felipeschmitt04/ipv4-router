@@ -13,18 +13,31 @@
 #include "../include/routing.hpp"
 
 #include <array>
+#include <atomic>
+#include <cerrno>
 #include <chrono>
+#include <cstdio>
 #include <cstdint>
 #include <iostream>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
+#include <utility>
+#include <pthread.h>
+#include <signal.h>
+#include <system_error>
 
 namespace {
 
 std::mutex sendMutex;
+
+// Mantem um socket Ethernet persistente por interface.
+std::unordered_map<std::string, std::unique_ptr<EthernetInterface>>
+    ethernetInterfaces;
 
 std::optional<interface> findInterface(const std::string& name) {
     for (const auto& iface : allInterfaces) {
@@ -81,27 +94,20 @@ void recordLocalDiscard(
     logDescarte("local", srcIp, dstIp, protocol);
 }
 
-void updateArpGauges(ArpResolver& arpResolver) {
-    globalMetrics().setArpEntradas(arpResolver.cacheSize());
-    globalMetrics().setArpPendentes(arpResolver.pendingPacketsSize());
-}
-
 void sendFrame(
     EthernetInterface& ethernet,
     const std::string& ifaceName,
     const std::vector<std::uint8_t>& frame) {
     std::lock_guard<std::mutex> lock(sendMutex);
-    ethernet.send(frame);
-    globalMetrics().incQuadrosEnviados(ifaceName);
+    if (ethernet.send(frame)) {
+        globalMetrics().incQuadrosEnviados(ifaceName);
+    }
 }
 
 void sendFrameByName(
     const std::string& ifaceName,
     const std::vector<std::uint8_t>& frame) {
-    std::lock_guard<std::mutex> lock(sendMutex);
-    EthernetInterface output(ifaceName);
-    output.send(frame);
-    globalMetrics().incQuadrosEnviados(ifaceName);
+    sendFrame(*ethernetInterfaces.at(ifaceName), ifaceName, frame);
 }
 
 void dispatchQueuedPacket(
@@ -109,17 +115,18 @@ void dispatchQueuedPacket(
     std::uint32_t nextHopIp,
     const interface& outIface,
     const std::vector<std::uint8_t>& pkt,
-    PacketOrigin origin) {
+    PacketOrigin origin,
+    std::optional<ReceivedPacketContext> context = std::nullopt) {
     const ArpPacketStatus st = arpResolver.sendOrQueue(
         nextHopIp,
         outIface,
         pkt,
-        std::chrono::steady_clock::now(),
-        origin);
+        std::nullopt,
+        origin,
+        std::move(context));
     if (st == ArpPacketStatus::QueueFull) {
         globalMetrics().incDescartePorMotivo("fila_arp");
     }
-    updateArpGauges(arpResolver);
 }
 
 void sendIcmpError(
@@ -129,52 +136,45 @@ void sendIcmpError(
     bool ethBroadcast,
     const std::string& dropReason,
     ArpResolver& arpResolver,
-    std::optional<std::uint32_t> overrideSrcIp = std::nullopt) {
+    std::uint32_t srcIp,
+    bool fromMgmt = false) {
     const ipv4Header origHdr = ipv4Interpreter(originalPacket);
     if (!origHdr.valid) {
         return;
     }
 
-    const forwardingResult route = forwarding(
-        origHdr.sourceIPAddr,
-        allInterfaces,
-        routeTable);
-    if (!route.found) {
-        const std::uint32_t localSrc = overrideSrcIp.has_value()
-            ? *overrideSrcIp
-            : (allInterfaces.empty() ? 0u : allInterfaces.front().interfaceIpAddr);
-        globalMetrics().incDescartePorMotivo("sem_rota");
-        logDescarte("sem_rota", localSrc, origHdr.sourceIPAddr, 1);
-        return;
-    }
-
-    const auto outIface = findInterface(route.interfaceName);
-    if (!outIface.has_value()) {
-        return;
-    }
-
-    const std::uint32_t srcIp = overrideSrcIp.has_value()
-        ? *overrideSrcIp
-        : outIface->interfaceIpAddr;
-
-    const std::vector<std::uint8_t> icmpPkt = buildICMPError(
-        originalPacket,
-        type,
-        code,
-        srcIp,
-        ethBroadcast,
-        dropReason);
+    const auto icmpPkt = buildICMPError(
+        originalPacket, type, code, srcIp, ethBroadcast, dropReason);
     if (icmpPkt.empty()) {
         return;
     }
 
     globalMetrics().incIcmpGerados();
-    dispatchQueuedPacket(
-        arpResolver,
-        route.nextHop,
-        *outIface,
-        icmpPkt,
-        PacketOrigin::Generated);
+
+    if (fromMgmt) {
+        const auto mgmtIface = findMgmtInterface();
+        if (mgmtIface.has_value()) {
+            dispatchQueuedPacket(
+                arpResolver, origHdr.sourceIPAddr, *mgmtIface,
+                icmpPkt, PacketOrigin::Generated);
+        }
+        return;
+    }
+
+    const forwardingResult route = forwarding(
+        origHdr.sourceIPAddr, allInterfaces, routeTable);
+    if (!route.found) {
+        globalMetrics().incDescartePorMotivo("sem_rota");
+        logDescarte("sem_rota", srcIp, origHdr.sourceIPAddr, 1);
+        return;
+    }
+
+    const auto outIface = findInterface(route.interfaceName);
+    if (outIface.has_value()) {
+        dispatchQueuedPacket(
+            arpResolver, route.nextHop, *outIface,
+            icmpPkt, PacketOrigin::Generated);
+    }
 }
 
 void handleArpFrame(
@@ -199,14 +199,11 @@ void handleArpFrame(
         return;
     }
 
-    const auto now = std::chrono::steady_clock::now();
     if (request->targetIP == incomingInterface.interfaceIpAddr &&
         request->senderIP != 0) {
         arpResolver.learnFromArp(
             *request,
-            incomingInterface,
-            now);
-        updateArpGauges(arpResolver);
+            incomingInterface);
     }
 
     if (!shouldReplyToArpRequest(
@@ -230,9 +227,7 @@ void handleArpFrame(
 }
 
 void handleLocalPacket(
-    EthernetInterface& ethernet,
     const interface& incomingInterface,
-    const EthernetHeader& ethHeader,
     const std::vector<std::uint8_t>& ipv4Packet,
     const ipv4Header& rawHdr,
     bool ethBroadcast,
@@ -240,6 +235,9 @@ void handleLocalPacket(
     const auto mgmtIface = findMgmtInterface();
     const bool isMgmtIp = mgmtIface.has_value() &&
         rawHdr.destinationIPAddr == mgmtIface->interfaceIpAddr;
+
+    const bool crossesMgmtBoundary =
+        (incomingInterface.interfaceName == "mgmt0") != isMgmtIp;
 
     if (rawHdr.protocol == 1) {
         const size_t ipHdrLen = static_cast<size_t>(rawHdr.IHL) * 4u;
@@ -257,23 +255,23 @@ void handleLocalPacket(
             return;
         }
 
+        if (crossesMgmtBoundary) {
+            recordLocalDiscard(rawHdr.sourceIPAddr, rawHdr.destinationIPAddr, rawHdr.protocol, true);
+            return;
+        }
+
         if (icmp.valid && icmp.type == 8 && icmp.code == 0) {
             const std::vector<std::uint8_t> echoReply = buildICMPEchoReply(ipv4Packet);
             if (!echoReply.empty()) {
+                globalMetrics().incIcmpGerados();
                 if (incomingInterface.interfaceName == "mgmt0" &&
                     rawHdr.destinationIPAddr == incomingInterface.interfaceIpAddr) {
-                    globalMetrics().incIcmpGerados();
-                    const auto outFrame = buildEthernetFrame(
-                        ethHeader.source,
-                        incomingInterface.mac,
-                        0x0800,
-                        echoReply);
-                    sendFrame(ethernet, "mgmt0", outFrame);
-                    return;
-                }
-
-                if (isMgmtIp) {
-                    recordLocalDiscard(rawHdr.sourceIPAddr, rawHdr.destinationIPAddr, rawHdr.protocol, true);
+                    dispatchQueuedPacket(
+                        arpResolver,
+                        rawHdr.sourceIPAddr,
+                        incomingInterface,
+                        echoReply,
+                        PacketOrigin::Generated);
                     return;
                 }
 
@@ -284,7 +282,6 @@ void handleLocalPacket(
                 if (route.found) {
                     const auto outIface = findInterface(route.interfaceName);
                     if (outIface.has_value()) {
-                        globalMetrics().incIcmpGerados();
                         dispatchQueuedPacket(
                             arpResolver,
                             route.nextHop,
@@ -295,7 +292,6 @@ void handleLocalPacket(
                     }
                 } else {
                     // Resposta gerada, mas sem rota para enviá-la.
-                    globalMetrics().incIcmpGerados();
                     globalMetrics().incDescartePorMotivo("sem_rota");
                     logDescarte("sem_rota", rawHdr.destinationIPAddr, rawHdr.sourceIPAddr, 1);
                     return;
@@ -314,18 +310,20 @@ void handleLocalPacket(
             return;
         }
 
-        const std::vector<uint8_t> udpSeg(
+        std::vector<uint8_t> udpSeg(
             ipv4Packet.begin() + static_cast<ptrdiff_t>(ipHdrLen),
             ipv4Packet.begin() + static_cast<ptrdiff_t>(rawHdr.totalLength));
 
-        const uint16_t udpDstPort = (static_cast<uint16_t>(udpSeg[2]) << 8) | udpSeg[3];
         const uint16_t udpLen = (static_cast<uint16_t>(udpSeg[4]) << 8) | udpSeg[5];
         const uint16_t udpCsum = (static_cast<uint16_t>(udpSeg[6]) << 8) | udpSeg[7];
 
-        if (udpLen < 8u || udpLen != udpSeg.size()) {
+        if (udpLen < 8u || udpLen > udpSeg.size()) {
             globalMetrics().incDescartesCabecalho();
             return;
         }
+
+        // Considera apenas os bytes declarados no cabecalho UDP.
+        udpSeg.resize(udpLen);
 
         if (udpCsum != 0u &&
             udpChecksumCheck(rawHdr.sourceIPAddr, rawHdr.destinationIPAddr, udpSeg) != 0u) {
@@ -333,10 +331,7 @@ void handleLocalPacket(
             return;
         }
 
-        const bool targetsMgmtIp = mgmtIface.has_value() &&
-            rawHdr.destinationIPAddr == mgmtIface->interfaceIpAddr;
-
-        if (incomingInterface.interfaceName != "mgmt0" && targetsMgmtIp && udpDstPort == 9100u) {
+        if (crossesMgmtBoundary) {
             recordLocalDiscard(rawHdr.sourceIPAddr, rawHdr.destinationIPAddr, rawHdr.protocol, true);
             return;
         }
@@ -349,7 +344,8 @@ void handleLocalPacket(
             ethBroadcast,
             "local",
             arpResolver,
-            rawHdr.destinationIPAddr);
+            rawHdr.destinationIPAddr,
+            incomingInterface.interfaceName == "mgmt0");
         return;
     }
 
@@ -357,14 +353,13 @@ void handleLocalPacket(
 }
 
 void handleIPv4Frame(
-    EthernetInterface& ethernet,
     const interface& incomingInterface,
     const EthernetHeader& ethHeader,
     const ReceivedFrame& receivedFrame,
     ArpResolver& arpResolver) {
     constexpr std::size_t ethernetHeaderSize = 14;
 
-    if (receivedFrame.data.size() <= ethernetHeaderSize) {
+    if (receivedFrame.data.size() < ethernetHeaderSize) {
         globalMetrics().incDescartesQuadro();
         return;
     }
@@ -384,25 +379,27 @@ void handleIPv4Frame(
     }
 
     const bool ethBroadcast = isBroadcastMac(ethHeader.destination);
+    const bool fragmented = rawHdr.fragmentOffset != 0 || (rawHdr.flag & 0x01u) != 0;
 
-    if (incomingInterface.interfaceName == "mgmt0") {
+    if (!fragmented && incomingInterface.interfaceName == "mgmt0") {
         std::vector<std::uint8_t> httpRespPacket;
         bool incHttp = false;
         if (handleMgmtMetricsUdpPacket(
                 incomingInterface,
                 ipv4Packet,
                 httpRespPacket,
-                incHttp)) {
+                incHttp,
+                arpResolver)) {
             if (!httpRespPacket.empty()) {
-                const auto outFrame = buildEthernetFrame(
-                    ethHeader.source,
-                    incomingInterface.mac,
-                    0x0800,
-                    httpRespPacket);
-                sendFrame(ethernet, "mgmt0", outFrame);
                 if (incHttp) {
                     globalMetrics().incRespostasHttp();
                 }
+                dispatchQueuedPacket(
+                    arpResolver,
+                    rawHdr.sourceIPAddr,
+                    incomingInterface,
+                    httpRespPacket,
+                    PacketOrigin::Generated);
             }
             return;
         }
@@ -416,10 +413,12 @@ void handleIPv4Frame(
         evaluateIPv4FilterIndexed);
 
     if (res.action == IPv4Action::Local) {
+        if (fragmented) {
+            recordLocalDiscard(rawHdr.sourceIPAddr, rawHdr.destinationIPAddr, rawHdr.protocol);
+            return;
+        }
         handleLocalPacket(
-            ethernet,
             incomingInterface,
-            ethHeader,
             originalPacket,
             rawHdr,
             ethBroadcast,
@@ -436,13 +435,15 @@ void handleIPv4Frame(
 
     if (res.action == IPv4Action::TTLExpired) {
         globalMetrics().incDescartePorMotivo("ttl");
-        sendIcmpError(originalPacket, 11, 0, ethBroadcast, "ttl", arpResolver);
+        sendIcmpError(originalPacket, 11, 0, ethBroadcast, "ttl", arpResolver,
+                      incomingInterface.interfaceIpAddr);
         return;
     }
 
     if (res.action == IPv4Action::NoRoute) {
         globalMetrics().incDescartePorMotivo("sem_rota");
-        sendIcmpError(originalPacket, 3, 0, ethBroadcast, "sem_rota", arpResolver);
+        sendIcmpError(originalPacket, 3, 0, ethBroadcast, "sem_rota", arpResolver,
+                      incomingInterface.interfaceIpAddr);
         return;
     }
 
@@ -455,19 +456,25 @@ void handleIPv4Frame(
                 res.nextHop,
                 *outIface,
                 ipv4Packet,
-                PacketOrigin::Received);
+                PacketOrigin::Received,
+                ReceivedPacketContext{originalPacket, incomingInterface.interfaceIpAddr, ethBroadcast});
         }
     }
 }
 
-void runInterface(interface incomingInterface, ArpResolver& arpResolver) {
-    EthernetInterface ethernet(incomingInterface.interfaceName);
+void runInterface(const interface& incomingInterface, ArpResolver& arpResolver,
+                  const std::atomic<bool>& stopping) {
+    EthernetInterface& ethernet =
+        *ethernetInterfaces.at(incomingInterface.interfaceName);
 
-    while (true) {
-        const ReceivedFrame receivedFrame = ethernet.receive();
+    while (!stopping.load()) {
+        const auto receivedFrame = ethernet.receive();
+        if (!receivedFrame || stopping.load()) {
+            continue;
+        }
         globalMetrics().incQuadrosRecebidos(incomingInterface.interfaceName);
 
-        const auto ethHeader = parseEthernetHeader(receivedFrame);
+        const auto ethHeader = parseEthernetHeader(*receivedFrame);
         if (!ethHeader.has_value()) {
             globalMetrics().incDescartesQuadro();
             continue;
@@ -482,14 +489,13 @@ void runInterface(interface incomingInterface, ArpResolver& arpResolver) {
             handleArpFrame(
                 ethernet,
                 incomingInterface,
-                receivedFrame,
+                *receivedFrame,
                 arpResolver);
         } else if (ethHeader->etherType == 0x0800) {
             handleIPv4Frame(
-                ethernet,
                 incomingInterface,
                 *ethHeader,
-                receivedFrame,
+                *receivedFrame,
                 arpResolver);
         } else {
             globalMetrics().incDescartesQuadro();
@@ -497,25 +503,44 @@ void runInterface(interface incomingInterface, ArpResolver& arpResolver) {
     }
 }
 
-void runCacheExpiration(ArpResolver& arpResolver) {
-    while (true) {
+void runCacheExpiration(ArpResolver& arpResolver, const std::atomic<bool>& stopping) {
+    while (!stopping.load()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        const auto now = std::chrono::steady_clock::now();
-        arpResolver.processTimeouts(now);
-        arpResolver.removeExpired(now);
-        updateArpGauges(arpResolver);
+        if (stopping.load()) {
+            break;
+        }
+        arpResolver.processTimeouts();
+        arpResolver.removeExpired(std::chrono::steady_clock::now());
     }
 }
 
 } // namespace
 
-int main(int argc, char* argv[]) {
+int main(int argc, char* argv[]) try {
     if (argc != 2) {
         std::cerr << "Uso: " << argv[0] << " ARQUIVO_DE_CONFIGURACAO\n";
         return 1;
     }
 
+    // As threads herdam a mascara. Somente a thread principal recebe SIGTERM.
+    sigset_t terminationSignals;
+    sigemptyset(&terminationSignals);
+    sigaddset(&terminationSignals, SIGTERM);
+    const int maskError = pthread_sigmask(SIG_BLOCK, &terminationSignals, nullptr);
+    if (maskError != 0) {
+        throw std::system_error(maskError, std::generic_category(), "pthread_sigmask");
+    }
+
     loadConfig(argv[1]);
+
+    // Cria os sockets Ethernet antes de iniciar as threads.
+    for (const interface& configuredInterface : allInterfaces) {
+        ethernetInterfaces.emplace(
+            configuredInterface.interfaceName,
+            std::make_unique<EthernetInterface>(
+                configuredInterface.interfaceName));
+    }
+
     logInicio(routerName);
 
     ArpResolver arpResolver(
@@ -528,27 +553,61 @@ int main(int argc, char* argv[]) {
                 globalMetrics().incDescartePorMotivo("arp");
             }
         },
-        [&](const std::vector<std::uint8_t>& forwardedPacket) {
-            std::vector<std::uint8_t> original = forwardedPacket;
-            if (original.size() >= 20) {
-                original[8] = static_cast<std::uint8_t>(original[8] + 1);
-                const uint8_t ihl = original[0] & 0x0Fu;
-                const uint16_t csum = calculateCheckSum(original, ihl);
-                original[10] = static_cast<uint8_t>(csum >> 8);
-                original[11] = static_cast<uint8_t>(csum & 0xFFu);
-            }
-            sendIcmpError(original, 3, 1, false, "arp", arpResolver);
+        [&](const ReceivedPacketContext& context) {
+            sendIcmpError(context.originalPacket, 3, 1, context.ethBroadcast,
+                          "arp", arpResolver, context.incomingIp);
         });
 
-    std::vector<std::thread> workers;
+    std::atomic<bool> stopping{false};
+    std::atomic<bool> failed{false};
+    const auto fail = [&](const char* reason) {
+        stopping.store(true);
+        if (!failed.exchange(true)) {
+            std::fprintf(stderr, "Erro fatal do roteador: %s\n", reason);
+        }
+    };
 
-    for (const interface& configuredInterface : allInterfaces) {
-        workers.emplace_back(runInterface, configuredInterface, std::ref(arpResolver));
+    const auto runWorker = [&](auto work) {
+        try {
+            work();
+        } catch (const std::exception& error) {
+            fail(error.what());
+        } catch (...) {
+            fail("excecao desconhecida na thread");
+        }
+    };
+
+    std::vector<std::thread> workers;
+    try {
+        for (const interface& configuredInterface : allInterfaces) {
+            workers.emplace_back(runWorker, [&, iface = &configuredInterface] {
+                runInterface(*iface, arpResolver, stopping);
+            });
+        }
+        workers.emplace_back(runWorker, [&] {
+            runCacheExpiration(arpResolver, stopping);
+        });
+    } catch (const std::exception& error) {
+        fail(error.what());
     }
 
-    workers.emplace_back(runCacheExpiration, std::ref(arpResolver));
+    while (!stopping.load()) {
+        const timespec wait{0, 100000000};
+        if (sigtimedwait(&terminationSignals, nullptr, &wait) == SIGTERM) {
+            stopping.store(true);
+        } else {
+            const int error = errno;
+            if (error != EAGAIN && error != EINTR) {
+                fail("falha em sigtimedwait");
+            }
+        }
+    }
 
     for (std::thread& worker : workers) {
         worker.join();
     }
+    return failed.load() ? 1 : 0;
+} catch (const std::exception& error) {
+    std::fprintf(stderr, "Erro fatal do roteador: %s\n", error.what());
+    return 1;
 }

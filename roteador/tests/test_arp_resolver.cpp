@@ -313,13 +313,14 @@ void testTimeoutReportsFailureAndNotifiesOnlyReceivedPackets()
         {
             sentFrames.push_back(frame);
         },
-        [&](std::uint32_t nextHopIp, const std::string &interfaceName)
+        [&](std::uint32_t nextHopIp, const std::string &interfaceName, std::size_t droppedPacketsCount)
         {
+            assert(droppedPacketsCount == 2);
             reportedFailures.push_back({nextHopIp, interfaceName});
         },
-        [&](const std::vector<std::uint8_t> &originalPacket)
+        [&](const ReceivedPacketContext &context)
         {
-            icmpOriginalPackets.push_back(originalPacket);
+            icmpOriginalPackets.push_back(context.originalPacket);
         });
 
     const interface outputInterface{
@@ -332,7 +333,13 @@ void testTimeoutReportsFailureAndNotifiesOnlyReceivedPackets()
     const std::vector<std::uint8_t> receivedPacket = {0x45, 0x01};
     const std::vector<std::uint8_t> generatedPacket = {0x45, 0x02};
 
-    resolver.sendOrQueue(nextHopIp, outputInterface, receivedPacket, start);
+    resolver.sendOrQueue(
+        nextHopIp,
+        outputInterface,
+        receivedPacket,
+        start,
+        PacketOrigin::Received,
+        ReceivedPacketContext{receivedPacket, outputInterface.interfaceIpAddr, false});
     resolver.sendOrQueue(
         nextHopIp,
         outputInterface,

@@ -84,7 +84,8 @@ namespace
         string conf =
             "# Comentario inicial\n"
             "   \n"
-            "  nome   roteador-teste   # comentario inline\n"
+            "# Comentario sobre o nome\n"
+            "  nome   roteador-teste\n"
             "interface eth0 10.0.1.1/24 02:00:00:00:01:00\n"
             "interface eth1 10.0.2.1/30 02:00:00:00:01:01\n"
             "gerencia mgmt0 192.168.100.1/24 02:00:00:00:01:ff\n"
@@ -124,8 +125,52 @@ namespace
         assert(filterRules[2].dstPort == 0);
     }
 
+    void testMoreThanEightDataInterfaces()
+    {
+        const string conf =
+            "nome r1\n"
+            "interface eth0 10.0.1.1/24 02:00:00:00:01:00\n"
+            "interface eth1 10.0.2.1/24 02:00:00:00:01:01\n"
+            "interface eth2 10.0.3.1/24 02:00:00:00:01:02\n"
+            "interface eth3 10.0.4.1/24 02:00:00:00:01:03\n"
+            "interface eth4 10.0.5.1/24 02:00:00:00:01:04\n"
+            "interface eth5 10.0.6.1/24 02:00:00:00:01:05\n"
+            "interface eth6 10.0.7.1/24 02:00:00:00:01:06\n"
+            "interface eth7 10.0.8.1/24 02:00:00:00:01:07\n"
+            "interface eth8 10.0.9.1/24 02:00:00:00:01:08\n"
+            "gerencia mgmt0 192.168.100.1/24 02:00:00:00:01:ff\n";
+
+        const string path = writeTempConf(conf);
+        loadConfig(path);
+        remove(path.c_str());
+
+        assert(allInterfaces.size() == 10);
+        for (uint8_t index = 0; index < 9; ++index)
+        {
+            const auto &iface = allInterfaces[index];
+            const array<uint8_t, 6> expectedMac{0x02, 0x00, 0x00, 0x00, 0x01, index};
+            assert(iface.interfaceName == "eth" + to_string(index));
+            assert(iface.interfaceIpAddr == 0x0A000101u + index * 0x100u);
+            assert(iface.prefixLength == 24);
+            assert(iface.mac == expectedMac);
+        }
+
+        const auto &management = allInterfaces.back();
+        const array<uint8_t, 6> managementMac{0x02, 0x00, 0x00, 0x00, 0x01, 0xff};
+        assert(management.interfaceName == "mgmt0");
+        assert(management.interfaceIpAddr == 0xC0A86401u);
+        assert(management.prefixLength == 24);
+        assert(management.mac == managementMac);
+    }
+
     void testInvalidCases()
     {
+        expectConfigFails(
+            "nome r1 # comentario inline\n"
+            "interface eth0 10.0.1.1/24 02:00:00:00:01:00\n"
+            "gerencia mgmt0 192.168.100.1/24 02:00:00:00:01:ff\n",
+            "comentario inline em diretiva");
+
         expectConfigFails(
             "interface eth0 10.0.1.1/24 02:00:00:00:01:00\n"
             "gerencia mgmt0 192.168.100.1/24 02:00:00:00:01:ff\n",
@@ -154,20 +199,6 @@ namespace
             "nome r1\n"
             "gerencia mgmt0 192.168.100.1/24 02:00:00:00:01:ff\n",
             "zero interfaces de dados");
-
-        expectConfigFails(
-            "nome r1\n"
-            "interface eth0 10.0.1.1/24 02:00:00:00:01:00\n"
-            "interface eth1 10.0.2.1/24 02:00:00:00:01:01\n"
-            "interface eth2 10.0.3.1/24 02:00:00:00:01:02\n"
-            "interface eth3 10.0.4.1/24 02:00:00:00:01:03\n"
-            "interface eth4 10.0.5.1/24 02:00:00:00:01:04\n"
-            "interface eth5 10.0.6.1/24 02:00:00:00:01:05\n"
-            "interface eth6 10.0.7.1/24 02:00:00:00:01:06\n"
-            "interface eth7 10.0.8.1/24 02:00:00:00:01:07\n"
-            "interface eth8 10.0.9.1/24 02:00:00:00:01:08\n"
-            "gerencia mgmt0 192.168.100.1/24 02:00:00:00:01:ff\n",
-            "mais de 8 interfaces");
 
         expectConfigFails(
             "nome r1\n"
@@ -298,6 +329,7 @@ int main()
 {
     testRealConfigFiles();
     testValidCompleteConfig();
+    testMoreThanEightDataInterfaces();
     testInvalidCases();
     cout << "Todos os testes de leitura e validacao de configuracao passaram." << endl;
     return 0;

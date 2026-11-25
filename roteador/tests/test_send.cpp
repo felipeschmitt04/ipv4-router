@@ -1,6 +1,7 @@
 #include "ethernet.hpp"
 #include <array>
 #include <cstdint>
+#include <iostream>
 #include <thread>
 #include <vector>
 #include <chrono>
@@ -39,7 +40,10 @@ int main(){
     );
 
     EthernetInterface eth0("eth0");
-    eth0.send(frame);
+    if (!eth0.send(frame)) {
+        std::cerr << "Falha ao transmitir o quadro Ethernet pela eth0.\n";
+        return 1;
+    }
 
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
 }

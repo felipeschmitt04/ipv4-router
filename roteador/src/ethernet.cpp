@@ -12,6 +12,33 @@
 #include <iomanip>
 #include <sstream>
 #include <cstring>
+#include <chrono>
+#include <cstdio>
+#include <poll.h>
+#include <thread>
+
+namespace
+{
+constexpr int ioWaitMs = 100;
+constexpr unsigned maxInterruptedSendAttempts = 3;
+
+bool isRecoverableIoError(int error)
+{
+    return error == EAGAIN || error == EWOULDBLOCK ||
+           error == ENOBUFS || error == ENOMEM ||
+           error == ENETDOWN || error == ENODEV || error == ENXIO;
+}
+
+void reportIoErrorOnce(std::atomic_flag &reported, const std::string &interfaceName,
+                       const char *operation, int error)
+{
+    if (!reported.test_and_set())
+    {
+        std::fprintf(stderr, "%s: %s falhou (errno=%d)\n",
+                     interfaceName.c_str(), operation, error);
+    }
+}
+}
 
 EthernetInterface::EthernetInterface(const std::string &interface_name) : interfaceName(interface_name)
 {
@@ -72,58 +99,67 @@ EthernetInterface::~EthernetInterface()
     }
 }
 
-ReceivedFrame EthernetInterface::receive() // função que bloqueia ate chegar um quadro Ethernet pela interface associada ao socket
+std::optional<ReceivedFrame> EthernetInterface::receive()
 {
-    std::vector<std::uint8_t> buffer(65536); // limite de buffer para receber o quadro, 65536 é um limite seguro
+    pollfd descriptor{fileDescriptor, POLLIN, 0};
+    const int ready = poll(&descriptor, 1, ioWaitMs);
+    if (ready < 0)
+    {
+        const int error = errno;
+        if (error == EINTR)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            return std::nullopt;
+        }
+        if (isRecoverableIoError(error))
+        {
+            reportIoErrorOnce(receiveErrorReported, interfaceName, "poll", error);
+            std::this_thread::sleep_for(std::chrono::milliseconds(ioWaitMs));
+            return std::nullopt;
+        }
+        throw std::system_error(error, std::generic_category(), "poll em " + interfaceName);
+    }
+    if (ready == 0)
+    {
+        return std::nullopt;
+    }
+    if (descriptor.revents & (POLLNVAL | POLLHUP))
+    {
+        const int error = descriptor.revents & POLLNVAL ? EBADF : EIO;
+        throw std::system_error(error, std::generic_category(), "poll em " + interfaceName);
+    }
 
+    std::vector<std::uint8_t> buffer(65536);
     sockaddr_ll address{};
     socklen_t addressLength = sizeof(address);
-
-    while (true)
+    const ssize_t received = recvfrom(fileDescriptor, buffer.data(), buffer.size(), MSG_DONTWAIT,
+                                      reinterpret_cast<sockaddr *>(&address), &addressLength);
+    if (received < 0)
     {
-        ssize_t received = recvfrom( // copia os bytes recebidos para o buffer
-            fileDescriptor,
-            buffer.data(),
-            buffer.size(),
-            0,
-            reinterpret_cast<sockaddr *>(&address),
-            &addressLength);
-
-        if (received >= 0)
+        const int error = errno;
+        if (error == EINTR)
         {
-            if (received == 0)
-            {
-                throw std::system_error(
-                    EPROTO,
-                    std::generic_category(),
-                    "quadro Ethernet vazio recebido");
-            }
-
-            if (address.sll_pkttype == PACKET_OUTGOING)
-            {
-                continue;
-            }
-
-            buffer.resize(static_cast<std::size_t>(received)); // deixa o vetor com o tamanho real do quadro recebido
-
-            return ReceivedFrame{// retorna os bytes completos do quadro e o indice da interface que o recebeu
-                                 std::move(buffer),
-                                 static_cast<unsigned int>(address.sll_ifindex)};
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            return std::nullopt;
         }
-
-        if (errno == EINTR)
+        if (isRecoverableIoError(error))
         {
-            continue;
+            reportIoErrorOnce(receiveErrorReported, interfaceName, "recvfrom", error);
+            std::this_thread::sleep_for(std::chrono::milliseconds(ioWaitMs));
+            return std::nullopt;
         }
-
-        throw std::system_error(
-            errno,
-            std::generic_category(),
-            "falha ao receber quadro Ethernet");
+        throw std::system_error(error, std::generic_category(), "recvfrom em " + interfaceName);
     }
+    if (address.sll_pkttype == PACKET_OUTGOING)
+    {
+        return std::nullopt;
+    }
+
+    buffer.resize(static_cast<std::size_t>(received));
+    return ReceivedFrame{std::move(buffer), static_cast<unsigned int>(address.sll_ifindex)};
 }
 
-void EthernetInterface::send(
+bool EthernetInterface::send(
     const std::vector<std::uint8_t> &frame)
 {
     constexpr std::size_t EthernetHeaderSize = 14;
@@ -148,13 +184,13 @@ void EthernetInterface::send(
         frame.data(),
         ETH_ALEN);
 
-    while (true)
+    for (unsigned interruptedAttempts = 0;;)
     {
         ssize_t sent = sendto(
             fileDescriptor,
             frame.data(),
             frame.size(),
-            0,
+            MSG_DONTWAIT | MSG_NOSIGNAL,
             reinterpret_cast<sockaddr *>(&address),
             sizeof(address));
 
@@ -165,19 +201,22 @@ void EthernetInterface::send(
                 throw std::system_error(
                     EIO,
                     std::generic_category(),
-                    "transmissao parcial de quadro Ethernet");
+                    "transmissao parcial de quadro Ethernet em " + interfaceName);
             }
-            return;
+            return true;
         }
-        if (errno == EINTR)
+        const int error = errno;
+        if (error == EINTR && ++interruptedAttempts < maxInterruptedSendAttempts)
         {
             continue;
         }
+        if (error == EINTR || isRecoverableIoError(error) || error == EMSGSIZE)
+        {
+            reportIoErrorOnce(sendErrorReported, interfaceName, "sendto", error);
+            return false;
+        }
 
-        throw std::system_error(
-            errno,
-            std::generic_category(),
-            "falha ao transmitir quadro Ethernet");
+        throw std::system_error(error, std::generic_category(), "sendto em " + interfaceName);
     }
 }
 
@@ -186,7 +225,7 @@ std::optional<EthernetHeader> parseEthernetHeader( // interpreta o cabeçalho
 {
     constexpr std::size_t ethernetHeaderSize = 14;
 
-    if (frame.data.size() < ethernetHeaderSize)
+    if (frame.data.size() < ethernetHeaderSize || frame.data.size() > 1514)
     {
         return std::nullopt;
     }
